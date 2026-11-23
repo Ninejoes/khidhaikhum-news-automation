@@ -8,6 +8,8 @@ The public source contains no newsroom records, generated media, model weights, 
 - `AUTO_PUBLISH_SECRET`
 - `SIWC_BYPASS_TOKEN`
 
+Scheduled runs post eligible Reels every two hours from 08:25 through 22:25 Bangkok time, after the newsroom collection cycle. Manual runs are render-only and never publish.
+
 The Facebook Page token remains encrypted in the private newsroom database. The worker receives only the two Site API credentials. Do not add secrets to files, workflow logs, issues, or pull requests.
 
 Each run renders into an operating-system temporary directory. The private publish API streams the MP4 directly to Facebook and does not retain a second copy in R2. Temporary audio and video are removed when the run finishes; the GitHub runner is then discarded. Model weights and the compiled TTS binary are cached separately so later runs can reuse them.
