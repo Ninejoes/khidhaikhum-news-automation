@@ -93,7 +93,7 @@ jobs:
           SIWC_BYPASS_TOKEN: ${{ secrets.SIWC_BYPASS_TOKEN }}
           REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
           VOXCPM2_CLI: ${{ github.workspace }}/third_party/llama.cpp-omni/build/bin/voxcpm2-cli
-        run: .venv/bin/python renderer/run.py --render-only
+        run: DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix cairo)/lib" .venv/bin/python renderer/run.py --render-only
 
       - name: Render and publish to Facebook
         if: github.event_name == 'schedule'
@@ -103,17 +103,17 @@ jobs:
           SIWC_BYPASS_TOKEN: ${{ secrets.SIWC_BYPASS_TOKEN }}
           REQUESTED_MODE: auto
           VOXCPM2_CLI: ${{ github.workspace }}/third_party/llama.cpp-omni/build/bin/voxcpm2-cli
-        run: .venv/bin/python renderer/run.py
+        run: DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix cairo)/lib" .venv/bin/python renderer/run.py
 
       - name: Save build cache
-        if: success()
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: third_party/llama.cpp-omni/build
           key: voxcpm2-metal-macos15-3dfca43-v1
 
       - name: Save model cache
-        if: success()
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: models
