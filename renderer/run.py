@@ -579,11 +579,27 @@ def main() -> None:
     secret = required_env("AUTO_PUBLISH_SECRET")
     siwc_token = required_env("SIWC_BYPASS_TOKEN")
     mode = pick_mode()
+    retry_item_id = os.environ.get("RETRY_ITEM_ID", "").strip()
     headers = {
         "Authorization": f"Bearer {secret}",
         "OAI-Sites-Authorization": f"Bearer {siwc_token}",
     }
-    queue = requests.get(f"{base_url}/api/automation/queue", params={"mode": mode}, headers=headers, timeout=25)
+    if retry_item_id:
+        if mode != "summary":
+            raise RuntimeError("A saved item retry must use summary mode")
+        retry = requests.post(
+            f"{base_url}/api/automation/retry",
+            headers=headers,
+            json={"itemId": retry_item_id},
+            timeout=25,
+        )
+        retry.raise_for_status()
+        print("The saved item was explicitly re-queued for this publish attempt.", flush=True)
+
+    queue_params = {"mode": mode}
+    if retry_item_id:
+        queue_params["itemId"] = retry_item_id
+    queue = requests.get(f"{base_url}/api/automation/queue", params=queue_params, headers=headers, timeout=25)
     queue.raise_for_status()
     data = queue.json()
     items = data.get("items") or []
