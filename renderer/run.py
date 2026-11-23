@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import regex
 import requests
 from cairosvg import svg2png
-from PIL import Image, ImageDraw, ImageFont, ImageOps, features
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, features
 
 
 WIDTH, HEIGHT, FPS = 1080, 1920, 30
@@ -346,19 +346,22 @@ def summary_metrics(item: dict) -> list[dict[str, str]]:
     return result
 
 
-def illustration_asset(item: dict) -> Path:
-    theme_text = " ".join(clean_text(item.get(key), 1000) for key in ("category", "title", "summary", "script")).lower()
-    if re.search(r"ทองคำ?|gold|โลหะมีค่า", theme_text):
-        name = "gold-vault.jpg"
-    elif re.search(r"พันธบัตร|ตราสารหนี้|bond|ออมทรัพย์", theme_text):
+def illustration_asset(item: dict, scene: dict | None = None) -> Path:
+    if scene:
+        theme_text = " ".join(clean_text(scene.get(key), 1000) for key in ("title", "body")).lower()
+    else:
+        theme_text = " ".join(clean_text(item.get(key), 1000) for key in ("category", "title")).lower()
+    if re.search(r"พันธบัตร|ตราสารหนี้|bond|ออมทรัพย์", theme_text):
         name = "bonds-civic.jpg"
+    elif re.search(r"ทองคำ?|gold|โลหะมีค่า", theme_text):
+        name = "gold-vault.jpg"
     else:
         name = "market-bangkok.jpg"
     return Path(__file__).resolve().parent / "assets" / "illustrations" / name
 
 
-def illustration_icon(item: dict) -> tuple[str, tuple[int, int, int]]:
-    asset = illustration_asset(item).stem
+def illustration_icon(item: dict, scene: dict | None = None) -> tuple[str, tuple[int, int, int]]:
+    asset = illustration_asset(item, scene).stem
     if asset == "gold-vault":
         return "hand-coins", (235, 197, 118)
     if asset == "bonds-civic":
@@ -388,20 +391,52 @@ def make_illustration_background(path: Path, item: dict) -> Path:
     return output
 
 
-def make_background(path: Path, item: dict, scene: dict, scene_index: int, scene_count: int) -> Path:
+def make_foreground_art(path: Path, item: dict, scene: dict, scene_index: int, height: int) -> Path:
+    source_path = illustration_asset(item, scene)
+    source = Image.open(source_path).convert("RGB")
+    card = Image.new("RGBA", (800, height), (0, 0, 0, 0))
+
+    shadow = Image.new("RGBA", card.size, (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw.rounded_rectangle((16, 20, 790, height - 12), radius=30, fill=(0, 0, 0, 160))
+    card = Image.alpha_composite(card, shadow.filter(ImageFilter.GaussianBlur(16)))
+
+    asset_name = source_path.stem
+    centers = {
+        "market-bangkok": (0.68, 0.72),
+        "gold-vault": (0.68, 0.75),
+        "bonds-civic": (0.67, 0.81),
+    }
+    photo = ImageOps.fit(source, (764, height - 36), method=Image.Resampling.LANCZOS,
+                         centering=centers.get(asset_name, (0.5, 0.68))).convert("RGBA")
+    mask = Image.new("L", photo.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, photo.width - 1, photo.height - 1), radius=25, fill=255)
+    card.paste(photo, (18, 14), mask)
+
+    icon_name, icon_color = illustration_icon(item, scene)
+    icon_path = Path(__file__).resolve().parent / "assets" / "lucide" / f"{icon_name}.svg"
+    icon_svg = icon_path.read_text(encoding="utf-8").replace("currentColor", "#%02x%02x%02x" % icon_color)
+    badge = Image.new("RGBA", (78, 78), (0, 0, 0, 0))
+    badge_draw = ImageDraw.Draw(badge)
+    badge_draw.ellipse((1, 1, 77, 77), fill=(5, 14, 20, 224), outline=(*icon_color, 225), width=2)
+    icon_png = svg2png(bytestring=icon_svg.encode("utf-8"), output_width=42, output_height=42)
+    icon = Image.open(BytesIO(icon_png)).convert("RGBA")
+    badge.alpha_composite(icon, (18, 18))
+    card.alpha_composite(badge, (32, 28))
+
+    ImageDraw.Draw(card).rounded_rectangle((8, 7, 792, height - 10), radius=30,
+                                           outline=(244, 247, 243, 175), width=3)
+    output = path / f"foreground-art-{scene_index:02d}.png"
+    card.save(output, optimize=True)
+    return output
+
+
+def make_background(path: Path, item: dict, scene: dict, scene_index: int,
+                    scene_count: int) -> tuple[Path, int, int]:
     theme_text = f"{item.get('category','')} {item.get('title','')} {scene.get('title','')} {scene.get('body','')}"
     topic, accent = topic_for(theme_text)
     # Typography stays sharp and still while the illustration moves underneath it.
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image, "RGBA")
-    icon_name, icon_color = illustration_icon(item)
-    icon_path = Path(__file__).resolve().parent / "assets" / "lucide" / f"{icon_name}.svg"
-    icon_svg = icon_path.read_text(encoding="utf-8").replace("currentColor", "#%02x%02x%02x" % icon_color)
-    draw.ellipse((426, 676, 654, 904), fill=(*icon_color, 18), outline=(*icon_color, 84), width=3)
-    icon_png = svg2png(bytestring=icon_svg.encode("utf-8"), output_width=168, output_height=168)
-    icon = Image.open(BytesIO(icon_png)).convert("RGBA")
-    icon.putalpha(icon.getchannel("A").point(lambda alpha: alpha * 220 // 255))
-    image.alpha_composite(icon, (456, 706))
     draw = ImageDraw.Draw(image, "RGBA")
 
     draw_text_with_fallback(draw, "คิดให้คุ้ม", (SAFE_MARGIN, 62), font(34, True), fallback_font(34, True), (244, 247, 245, 255))
@@ -424,9 +459,12 @@ def make_background(path: Path, item: dict, scene: dict, scene_index: int, scene
     heading = clean_text(scene.get("title"), 150)
     if scene_index == 0:
         heading = re.sub(r"^(?:สรุปข่าว(?:เช้า|เที่ยง|เย็น)?\s*\d{1,2}:\d{2}\s*[—–-]\s*)", "", heading, flags=re.I)
-    heading_font = font(68 if scene_index == 0 else 54, True)
-    draw_wrapped(draw, heading, (SAFE_MARGIN, 304), heading_font, (247, 249, 247, 255), WIDTH - 2 * SAFE_MARGIN, 3,
-                 spacing=17, fallback=fallback_font(heading_font.size, True))
+    heading_font = font(60 if scene_index == 0 else 50, True)
+    heading_bottom = draw_wrapped(draw, heading, (SAFE_MARGIN, 304), heading_font, (247, 249, 247, 255), WIDTH - 2 * SAFE_MARGIN, 3,
+                                  spacing=17, fallback=fallback_font(heading_font.size, True))
+    card_y = min(625, max(455, heading_bottom + 38))
+    card_bottom = 1035 if scene_index == 0 else 1025
+    card_height = max(360, min(540, card_bottom - card_y))
 
     takeaway = short_text(item.get("impact") or item.get("summary"), 72)
     if takeaway and scene_index == 0:
@@ -455,17 +493,22 @@ def make_background(path: Path, item: dict, scene: dict, scene_index: int, scene
 
     out = path / f"scene-{scene_index:02d}.png"
     image.save(out, optimize=True)
-    return out
+    return out, card_y, card_height
 
 
-def make_clip_scene(art_path: Path, text_path: Path, output: Path, duration: float, scene_index: int) -> None:
+def make_clip_scene(art_path: Path, text_path: Path, card_path: Path, card_y: int, output: Path,
+                    duration: float, scene_index: int) -> None:
     phase = scene_index * 0.73
     zoom = f"1.035+0.012*sin(2*PI*on/{FPS * 5}+{phase:.2f})"
     pan_x = f"iw/2-iw/zoom/2+7*sin(2*PI*on/{FPS * 6}+{phase:.2f})"
     pan_y = f"ih/2-ih/zoom/2+10*sin(2*PI*on/{FPS * 7}+{phase:.2f})"
+    card_x = f"(W-w)/2+5*sin(2*PI*t/5+{phase:.2f})"
+    card_y_expr = f"{card_y}+7*sin(2*PI*t/6+{phase:.2f})"
     vf = (
         f"[0:v]scale={WIDTH}:{HEIGHT},zoompan=z='{zoom}':x='{pan_x}':y='{pan_y}':d=1:s={WIDTH}x{HEIGHT}:fps={FPS},setsar=1,format=rgba[art];"
-        "[art][1:v]overlay=x=0:y=0:shortest=1,"
+        "[2:v]format=rgba,fade=t=in:st=0:d=0.34:alpha=1[card];"
+        f"[art][card]overlay=x='{card_x}':y='{card_y_expr}':shortest=1[withcard];"
+        "[withcard][1:v]overlay=x=0:y=0:shortest=1,"
         "fade=t=in:st=0:d=0.22,"
         f"fade=t=out:st={max(0.1, duration - 0.25):.3f}:d=0.25,format=yuv420p[v]"
     )
@@ -473,6 +516,7 @@ def make_clip_scene(art_path: Path, text_path: Path, output: Path, duration: flo
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-loop", "1", "-framerate", str(FPS), "-i", str(art_path),
         "-loop", "1", "-framerate", str(FPS), "-i", str(text_path),
+        "-loop", "1", "-framerate", str(FPS), "-i", str(card_path),
         "-t", f"{duration:.3f}", "-filter_complex", vf,
         "-map", "[v]", "-an", "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast",
         "-crf", "22", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
@@ -621,9 +665,10 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
     segments: list[Path] = []
     art_background = make_illustration_background(work, item)
     for index, scene in enumerate(scenes):
-        text_overlay = make_background(work, item, scene, index, len(scenes))
+        text_overlay, card_y, card_height = make_background(work, item, scene, index, len(scenes))
+        foreground_art = make_foreground_art(work, item, scene, index, card_height)
         output = work / f"clip-{index:02d}.mp4"
-        make_clip_scene(art_background, text_overlay, output, durations[index], index)
+        make_clip_scene(art_background, text_overlay, foreground_art, card_y, output, durations[index], index)
         segments.append(output)
 
     concat_list = work / "concat.txt"
