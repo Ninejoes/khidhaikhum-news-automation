@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Queue to render for the cloud smoke run
+        description: News queue to process
         type: choice
         options:
           - auto
@@ -14,6 +14,11 @@ on:
           - breaking
         default: auto
         required: true
+      publish:
+        description: Publish the selected item to Facebook (otherwise render only)
+        type: boolean
+        default: false
+        required: false
 
 permissions:
   contents: read
@@ -90,7 +95,7 @@ jobs:
         run: .venv/bin/python renderer/download_voxcpm2.py
 
       - name: Render and validate without posting
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.publish != true
         env:
           NEWSROOM_URL: ${{ secrets.NEWSROOM_URL }}
           AUTO_PUBLISH_SECRET: ${{ secrets.AUTO_PUBLISH_SECRET }}
@@ -101,12 +106,12 @@ jobs:
         run: DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix cairo)/lib" .venv/bin/python renderer/run.py --render-only
 
       - name: Render and publish to Facebook
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
         env:
           NEWSROOM_URL: ${{ secrets.NEWSROOM_URL }}
           AUTO_PUBLISH_SECRET: ${{ secrets.AUTO_PUBLISH_SECRET }}
           SIWC_BYPASS_TOKEN: ${{ secrets.SIWC_BYPASS_TOKEN }}
-          REQUESTED_MODE: auto
+          REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
           VOXCPM2_USE_CPU: '1'
           VOXCPM2_CLI: ${{ github.workspace }}/third_party/llama.cpp-omni/build/bin/voxcpm2-cli
         run: DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix cairo)/lib" .venv/bin/python renderer/run.py

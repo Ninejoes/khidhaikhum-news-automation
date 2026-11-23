@@ -8,7 +8,7 @@ The public source contains no newsroom records, generated media, model weights, 
 - `AUTO_PUBLISH_SECRET`
 - `SIWC_BYPASS_TOKEN`
 
-Scheduled runs post eligible Reels every two hours from 08:25 through 22:25 Bangkok time, after the newsroom collection cycle. Manual runs are render-only and never publish.
+Scheduled runs post eligible Reels every two hours from 08:25 through 22:25 Bangkok time, after the newsroom collection cycle. Manual runs default to render-only; publishing requires explicitly setting the `publish` input.
 
 The Facebook Page token remains encrypted in the private newsroom database. The worker receives only the two Site API credentials. Do not add secrets to files, workflow logs, issues, or pull requests.
 
