@@ -21,3 +21,5 @@ Each run renders into an operating-system temporary directory. The private publi
 
 The repository is public so standard GitHub-hosted runners can be used without Actions minute charges. Keep all workflow triggers restricted to the default branch and do not add pull-request execution that can access secrets.
 
+The renderer bundles Google Sans Text for body copy and Google Sans Bold for headlines, plus locally stored topic artwork and Lucide SVG accents. This keeps every render consistent without calling a paid image-generation service. Font licensing is included in `renderer/assets/fonts/OFL.txt`.
+

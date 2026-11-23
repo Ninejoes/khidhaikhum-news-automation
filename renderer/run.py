@@ -13,19 +13,26 @@ import resource
 import sys
 import time
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import regex
 import requests
 from cairosvg import svg2png
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageOps, features
 
 
 WIDTH, HEIGHT, FPS = 1080, 1920, 30
+SAFE_MARGIN = 84
+RIGHT_EDGE = WIDTH - SAFE_MARGIN
+CARD_PADDING = 32
+CONTENT_X = SAFE_MARGIN + CARD_PADDING
+CONTENT_WIDTH = WIDTH - 2 * CONTENT_X
 VOICE = "th-TH-NiwatNeural"
 ROOT = Path(__file__).resolve().parents[1]
 TZ = ZoneInfo("Asia/Bangkok")
+FONT_LAYOUT = ImageFont.Layout.RAQM if features.check("raqm") else ImageFont.Layout.BASIC
 
 
 def required_env(name: str) -> str:
@@ -43,6 +50,9 @@ def pick_mode() -> str:
 
 
 def font_path(bold: bool = False) -> str:
+    bundled = Path(__file__).resolve().parent / "assets" / "fonts" / ("GoogleSans-Bold.ttf" if bold else "GoogleSansText-Regular.ttf")
+    if bundled.is_file():
+        return str(bundled)
     candidates = [
         "/usr/share/fonts/truetype/noto/NotoSansThai-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
         "/usr/share/fonts/opentype/tlwg/TlwgTypo-Bold.ttf" if bold else "/usr/share/fonts/opentype/tlwg/TlwgTypo.ttf",
@@ -79,7 +89,7 @@ FONT_FALLBACK_BOLD = fallback_font_path(True)
 
 def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     path = FONT_BOLD if bold else FONT_REGULAR
-    face = ImageFont.truetype(path, size)
+    face = ImageFont.truetype(path, size, layout_engine=FONT_LAYOUT)
     if hasattr(face, "set_variation_by_name"):
         try:
             face.set_variation_by_name("Bold" if bold else "Regular")
@@ -89,34 +99,50 @@ def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
 
 
 def fallback_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(FONT_FALLBACK_BOLD if bold else FONT_FALLBACK_REGULAR, size)
+    return ImageFont.truetype(FONT_FALLBACK_BOLD if bold else FONT_FALLBACK_REGULAR, size, layout_engine=FONT_LAYOUT)
 
 
 def _font_for_cluster(cluster: str, thai: ImageFont.FreeTypeFont,
                       fallback: ImageFont.FreeTypeFont) -> ImageFont.FreeTypeFont:
-    return thai if any("\u0e00" <= char <= "\u0e7f" for char in cluster) else fallback
+    # Google Sans includes Thai and Latin; keep both in one family and reserve
+    # the fallback for supplementary-plane symbols such as emoji.
+    return fallback if any(ord(char) > 0xFFFF for char in cluster) else thai
+
+
+def _font_runs(text: str, thai: ImageFont.FreeTypeFont,
+               fallback: ImageFont.FreeTypeFont | None) -> list[tuple[ImageFont.FreeTypeFont, str]]:
+    if fallback is None:
+        return [(thai, text)]
+    runs: list[tuple[ImageFont.FreeTypeFont, str]] = []
+    for cluster in regex.findall(r"\X", text):
+        selected = _font_for_cluster(cluster, thai, fallback)
+        if runs and runs[-1][0] is selected:
+            runs[-1] = (selected, runs[-1][1] + cluster)
+        else:
+            runs.append((selected, cluster))
+    return runs
 
 
 def text_width(text: str, thai: ImageFont.FreeTypeFont,
                fallback: ImageFont.FreeTypeFont | None = None) -> float:
-    if fallback is None:
-        return thai.getlength(text)
-    return sum(_font_for_cluster(cluster, thai, fallback).getlength(cluster)
-               for cluster in regex.findall(r"\X", text))
+    return sum(selected.getlength(run) for selected, run in _font_runs(text, thai, fallback))
 
 
 def draw_text_with_fallback(draw: ImageDraw.ImageDraw, text: str, xy: tuple[float, float],
                             thai: ImageFont.FreeTypeFont, fallback: ImageFont.FreeTypeFont | None,
                             fill: tuple[int, int, int, int]) -> float:
     x, y = xy
-    if fallback is None:
-        draw.text((x, y), text, font=thai, fill=fill, stroke_width=0)
-        return x + thai.getlength(text)
-    for cluster in regex.findall(r"\X", text):
-        selected = _font_for_cluster(cluster, thai, fallback)
-        draw.text((x, y), cluster, font=selected, fill=fill, stroke_width=0)
-        x += selected.getlength(cluster)
+    for selected, run in _font_runs(text, thai, fallback):
+        draw.text((x, y), run, font=selected, fill=fill, stroke_width=0)
+        x += selected.getlength(run)
     return x
+
+
+def draw_text_right(draw: ImageDraw.ImageDraw, text: str, right: int, y: int,
+                    selected_font: ImageFont.FreeTypeFont, fallback: ImageFont.FreeTypeFont | None,
+                    fill: tuple[int, int, int, int]) -> float:
+    left = right - text_width(text, selected_font, fallback)
+    return draw_text_with_fallback(draw, text, (left, y), selected_font, fallback, fill)
 
 
 def clean_text(value: object, limit: int = 2000) -> str:
@@ -160,6 +186,11 @@ def wrap_text(text: str, selected_font: ImageFont.FreeTypeFont, max_width: int, 
             cut = len(clusters)
             while cut > 1 and measure("".join(clusters[:cut])) > max_width:
                 cut -= 1
+            # Avoid orphaning a one- or two-character Thai fragment at the
+            # start of the next line (for example, splitting "โลก" into "โล"/"ก").
+            remainder = len(clusters) - cut
+            if 0 < remainder < 3 and len(clusters) >= 4:
+                cut = max(1, cut - (3 - remainder))
             lines.append("".join(clusters[:cut]))
             clusters = clusters[cut:]
             if len(lines) >= max_lines:
@@ -193,10 +224,10 @@ def topic_for(text: str) -> tuple[str, tuple[int, int, int]]:
     value = text.lower()
     checks = [
         (("น้ำท่วม", "น้ำป่า", "น้ำหลาก", "ฝนตก", "อากาศ", "พายุ", "มรสุม", "คลื่น"), ("สภาพอากาศ", (99, 190, 215))),
-        (("อาชญาก", "ตำรวจ", "คดี", "จับกุม", "ผู้ต้องหา", "เหตุ", "อุบัติเหตุ", "ภัย"), ("เหตุการณ์", (242, 142, 113))),
+        (("อาชญาก", "ตำรวจ", "คดี", "จับกุม", "ผู้ต้องหา", "เหตุการณ์", "อุบัติเหตุ", "ภัยพิบัติ"), ("เหตุการณ์", (242, 142, 113))),
         (("กีฬา", "ฟุตบอล", "บาส", "นักกีฬา", "ทีมชาติ", "พรีเมียร์ลีก", "แชมป์"), ("กีฬา", (111, 189, 166))),
         (("บันเทิง", "นักแสดง", "ดารา", "ภาพยนตร์", "เพลง", "คอนเสิร์ต", "ศิลปิน"), ("บันเทิง", (193, 153, 210))),
-        (("หุ้น", "ลงทุน", "ตลาด", "เศรษฐกิจ", "การเงิน", "ธนาคาร", "เงิน", "ภาษี", "หนี้", "ดอกเบี้ย"), ("การเงิน", (149, 190, 135))),
+        (("หุ้น", "ลงทุน", "ตลาด", "เศรษฐกิจ", "การเงิน", "ธนาคาร", "เงิน", "ทอง", "พันธบัตร", "ตราสารหนี้", "ภาษี", "หนี้", "ดอกเบี้ย"), ("การเงิน", (149, 190, 135))),
         (("ai", "เอไอ", "ชิป", "เทคโนโลยี", "เทค", "ดาต้าเซ็นเตอร์", "ปัญญาประดิษฐ์"), ("เทคโนโลยี", (221, 172, 117))),
         (("การเมือง", "รัฐบาล", "นายก", "รัฐมนตรี", "นโยบาย", "สภา", "เลือกตั้ง"), ("นโยบาย", (118, 164, 206))),
     ]
@@ -204,31 +235,6 @@ def topic_for(text: str) -> tuple[str, tuple[int, int, int]]:
         if any(word in value for word in words):
             return result
     return "กระแสวันนี้", (154, 183, 170)
-
-
-def icon_for(text: str) -> str:
-    category = topic_for(text)[0]
-    value = text.lower()
-    if "ที่มาและความโปร่งใส" in text or "ตรวจสอบจากหลายแหล่ง" in text:
-        return "newspaper"
-    if category == "การเงิน":
-        if any(word in value for word in ("หุ้น", "nasdaq", "set", "s&p", "ตลาด")):
-            return "briefcase-business"
-        if any(word in value for word in ("sme", "สินเชื่อ", "npl", "หนี้", "กู้")):
-            return "hand-coins"
-        if any(word in value for word in ("กฎ", "มาตรการ", "ภาษี", "รัฐบาล", "ควบคุม")):
-            return "file-text"
-    if category == "นโยบาย" and any(word in value for word in ("มาตรการ", "กฎ", "ควบคุม", "รัฐบาล")):
-        return "file-text"
-    return {
-        "สภาพอากาศ": "cloud-rain",
-        "เหตุการณ์": "alert-triangle",
-        "กีฬา": "trophy",
-        "บันเทิง": "clapperboard",
-        "เทคโนโลยี": "cpu",
-        "นโยบาย": "landmark",
-        "การเงิน": "landmark",
-    }.get(category, "newspaper")
 
 
 def split_summary(item: dict) -> list[str]:
@@ -340,25 +346,66 @@ def summary_metrics(item: dict) -> list[dict[str, str]]:
     return result
 
 
+def illustration_asset(item: dict) -> Path:
+    theme_text = " ".join(clean_text(item.get(key), 1000) for key in ("category", "title", "summary", "script")).lower()
+    if re.search(r"ทองคำ?|gold|โลหะมีค่า", theme_text):
+        name = "gold-vault.jpg"
+    elif re.search(r"พันธบัตร|ตราสารหนี้|bond|ออมทรัพย์", theme_text):
+        name = "bonds-civic.jpg"
+    else:
+        name = "market-bangkok.jpg"
+    return Path(__file__).resolve().parent / "assets" / "illustrations" / name
+
+
+def illustration_icon(item: dict) -> tuple[str, tuple[int, int, int]]:
+    asset = illustration_asset(item).stem
+    if asset == "gold-vault":
+        return "hand-coins", (235, 197, 118)
+    if asset == "bonds-civic":
+        return "landmark", (144, 204, 213)
+    _, accent = topic_for(clean_text(item.get("category"), 100) + " " + clean_text(item.get("title"), 300))
+    return "briefcase-business", accent
+
+
+def make_illustration_background(path: Path, item: dict) -> Path:
+    source_path = illustration_asset(item)
+    if not source_path.is_file():
+        raise RuntimeError(f"Missing bundled news illustration: {source_path.name}")
+    source = Image.open(source_path).convert("RGB")
+    image = ImageOps.fit(source, (WIDTH, HEIGHT), method=Image.Resampling.LANCZOS, centering=(0.5, 0.56)).convert("RGBA")
+
+    # Keep the artwork visible while giving the Thai captions a calm, readable stage.
+    image = Image.alpha_composite(image, Image.new("RGBA", (WIDTH, HEIGHT), (3, 10, 19, 82)))
+    shade = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    shade_draw = ImageDraw.Draw(shade)
+    for y in range(HEIGHT):
+        progress = max(0.0, min(1.0, (y - 760) / 1160))
+        alpha = 8 + int(68 * progress)
+        shade_draw.line((0, y, WIDTH, y), fill=(3, 10, 19, alpha))
+    image = Image.alpha_composite(image, shade)
+    output = path / "illustration-background.png"
+    image.convert("RGB").save(output, optimize=True)
+    return output
+
+
 def make_background(path: Path, item: dict, scene: dict, scene_index: int, scene_count: int) -> Path:
     theme_text = f"{item.get('category','')} {item.get('title','')} {scene.get('title','')} {scene.get('body','')}"
     topic, accent = topic_for(theme_text)
-    image = Image.new("RGBA", (WIDTH, HEIGHT), (9, 17, 24, 255))
+    # Typography stays sharp and still while the illustration moves underneath it.
+    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image, "RGBA")
-    for y in range(HEIGHT):
-        depth = y / HEIGHT
-        color = (9 + int(depth * 5), 18 + int(depth * 8), 24 + int(depth * 10), 255)
-        draw.line((0, y, WIDTH, y), fill=color)
-
-    # One soft studio light and one topic icon replace the old grid and chart-like ornament.
-    glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    glow_draw = ImageDraw.Draw(glow, "RGBA")
-    glow_draw.ellipse((505, 650, 1230, 1375), fill=(*accent, 38))
-    image = Image.alpha_composite(image, glow.filter(ImageFilter.GaussianBlur(155)))
+    icon_name, icon_color = illustration_icon(item)
+    icon_path = Path(__file__).resolve().parent / "assets" / "lucide" / f"{icon_name}.svg"
+    icon_svg = icon_path.read_text(encoding="utf-8").replace("currentColor", "#%02x%02x%02x" % icon_color)
+    draw.ellipse((426, 676, 654, 904), fill=(*icon_color, 18), outline=(*icon_color, 84), width=3)
+    icon_png = svg2png(bytestring=icon_svg.encode("utf-8"), output_width=168, output_height=168)
+    icon = Image.open(BytesIO(icon_png)).convert("RGBA")
+    icon.putalpha(icon.getchannel("A").point(lambda alpha: alpha * 220 // 255))
+    image.alpha_composite(icon, (456, 706))
     draw = ImageDraw.Draw(image, "RGBA")
 
-    draw_text_with_fallback(draw, "คิดให้คุ้ม", (76, 62), font(34, True), fallback_font(34, True), (244, 247, 245, 255))
-    draw_text_with_fallback(draw, "ข่าวที่ตรวจสอบแล้ว", (76, 112), font(21, True), fallback_font(21, True), (154, 174, 178, 255))
+    draw_text_with_fallback(draw, "คิดให้คุ้ม", (SAFE_MARGIN, 62), font(34, True), fallback_font(34, True), (244, 247, 245, 255))
+    draw_text_with_fallback(draw, "ข่าวที่ตรวจสอบแล้ว", (SAFE_MARGIN, 112), font(21, True), fallback_font(21, True), (154, 174, 178, 255))
     checked_at = item.get("checkedAt") or item.get("checked_at")
     checked_label = "ตรวจข้อมูลล่าสุด"
     if checked_at:
@@ -367,72 +414,65 @@ def make_background(path: Path, item: dict, scene: dict, scene_index: int, scene
             checked_label = "ตรวจข้อมูล " + checked.strftime("%d %b · %H:%M")
         except ValueError:
             pass
-    draw_text_with_fallback(draw, checked_label, (700, 81), font(21, True), fallback_font(21, True), (178, 194, 197, 255))
+    draw_text_right(draw, checked_label, RIGHT_EDGE, 81, font(21, True), fallback_font(21, True), (178, 194, 197, 255))
 
-    rounded(draw, (76, 196, 366, 250), 22, (*accent, 28))
-    draw.ellipse((97, 216, 113, 232), fill=(*accent, 255))
-    draw_text_with_fallback(draw, topic, (129, 205), font(24, True), fallback_font(24, True), (235, 242, 239, 255))
-    draw_text_with_fallback(draw, f"{scene_index + 1:02d}/{scene_count:02d}", (920, 210), font(21, True), fallback_font(21, True), (158, 179, 183, 255))
+    rounded(draw, (SAFE_MARGIN, 196, SAFE_MARGIN + 290, 250), 22, (*accent, 28))
+    draw.ellipse((SAFE_MARGIN + 21, 216, SAFE_MARGIN + 37, 232), fill=(*accent, 255))
+    draw_text_with_fallback(draw, topic, (SAFE_MARGIN + 53, 205), font(24, True), fallback_font(24, True), (235, 242, 239, 255))
+    draw_text_right(draw, f"{scene_index + 1:02d}/{scene_count:02d}", RIGHT_EDGE, 210, font(21, True), fallback_font(21, True), (158, 179, 183, 255))
 
     heading = clean_text(scene.get("title"), 150)
     if scene_index == 0:
         heading = re.sub(r"^(?:สรุปข่าว(?:เช้า|เที่ยง|เย็น)?\s*\d{1,2}:\d{2}\s*[—–-]\s*)", "", heading, flags=re.I)
     heading_font = font(68 if scene_index == 0 else 54, True)
-    draw_wrapped(draw, heading, (76, 304), heading_font, (247, 249, 247, 255), 928, 3,
+    draw_wrapped(draw, heading, (SAFE_MARGIN, 304), heading_font, (247, 249, 247, 255), WIDTH - 2 * SAFE_MARGIN, 3,
                  spacing=17, fallback=fallback_font(heading_font.size, True))
 
-    # Keep the visual vocabulary relevant to the story; no stock people and no generic charts.
     takeaway = short_text(item.get("impact") or item.get("summary"), 72)
     if takeaway and scene_index == 0:
-        rounded(draw, (76, 1070, 1004, 1246), 25, (17, 31, 37, 208))
-        draw_text_with_fallback(draw, "ประเด็นที่ควรรู้", (108, 1094), font(23, True), fallback_font(23, True), (*accent, 255))
-        draw_wrapped(draw, takeaway, (108, 1138), font(31, True), (228, 236, 233, 255), 852, 2,
+        rounded(draw, (SAFE_MARGIN, 1070, RIGHT_EDGE, 1246), 25, (17, 31, 37, 208))
+        draw_text_with_fallback(draw, "ประเด็นที่ควรรู้", (CONTENT_X, 1094), font(23, True), fallback_font(23, True), (*accent, 255))
+        draw_wrapped(draw, takeaway, (CONTENT_X, 1138), font(31, True), (228, 236, 233, 255), CONTENT_WIDTH, 2,
                      spacing=10, fallback=fallback_font(31, True))
 
-    body = clean_text(scene.get("body"), 220)
     body_top = 1294 if scene_index == 0 else 1090
     body_start = 1344 if scene_index == 0 else 1140
-    body_font = font(40 if scene_index == 0 else 36, False)
+    panel_top = 1268 if scene_index == 0 else 1065
+    panel_bottom = 1540 if scene_index == 0 else 1495
+    rounded(draw, (SAFE_MARGIN, panel_top, RIGHT_EDGE, panel_bottom), 28, (10, 23, 31, 214), (*accent, 58), 2)
+    body = clean_text(scene.get("body"), 220)
+    body_font = font(34, False)
     body_lines = 3 if scene_index == 0 else 4
-    draw_text_with_fallback(draw, clean_text(scene.get("label") or "สรุปข่าว", 50), (76, body_top),
+    draw_text_with_fallback(draw, clean_text(scene.get("label") or "สรุปข่าว", 50), (CONTENT_X, body_top),
                             font(24, True), fallback_font(24, True), (*accent, 255))
-    draw_wrapped(draw, body, (76, body_start), body_font, (243, 246, 244, 255), 928, body_lines,
+    draw_wrapped(draw, body, (CONTENT_X, body_start), body_font, (243, 246, 244, 255), CONTENT_WIDTH, body_lines,
                  spacing=14, fallback=fallback_font(body_font.size, False))
 
-    draw_text_with_fallback(draw, "แหล่งข่าวและรายละเอียดอยู่ในคำบรรยายโพสต์", (76, 1740),
+    draw_text_with_fallback(draw, "แหล่งข่าวและรายละเอียดอยู่ในคำบรรยายโพสต์", (SAFE_MARGIN, 1740),
                             font(22), fallback_font(22), (171, 189, 192, 255))
-    draw_text_with_fallback(draw, "เสียงผู้บรรยายสังเคราะห์ด้วย AI", (76, 1792),
+    draw_text_with_fallback(draw, "เสียงผู้บรรยายสังเคราะห์ด้วย AI", (SAFE_MARGIN, 1792),
                             font(20, True), fallback_font(20, True), (132, 154, 159, 255))
 
     out = path / f"scene-{scene_index:02d}.png"
-    image.convert("RGB").save(out, optimize=True)
+    image.save(out, optimize=True)
     return out
 
 
-def make_object(path: Path, item: dict, scene: dict, scene_index: int) -> Path:
-    theme_text = f"{item.get('category','')} {scene.get('title','')} {scene.get('body','')}"
-    _, accent = topic_for(theme_text)
-    icon_name = icon_for(theme_text)
-    svg_path = Path(__file__).resolve().parent / "assets" / "lucide" / f"{icon_name}.svg"
-    svg = svg_path.read_text(encoding="utf-8").replace("currentColor", "#%02x%02x%02x" % accent)
-    image = svg2png(bytestring=svg.encode("utf-8"), output_width=360, output_height=360)
-    out = path / f"object-{scene_index:02d}.png"
-    out.write_bytes(image)
-    return out
-def make_clip_scene(base: Path, object_path: Path, output: Path, duration: float, scene_index: int) -> None:
-    movement = "if(lt(t\\,0.42)\\,W-(W-620)*t/0.42\\,620+8*sin(2*PI*t/4))"
-    vertical = f"680+8*sin(2*PI*t/{3.6 + scene_index * 0.17:.2f})"
+def make_clip_scene(art_path: Path, text_path: Path, output: Path, duration: float, scene_index: int) -> None:
+    phase = scene_index * 0.73
+    zoom = f"1.035+0.012*sin(2*PI*on/{FPS * 5}+{phase:.2f})"
+    pan_x = f"iw/2-iw/zoom/2+7*sin(2*PI*on/{FPS * 6}+{phase:.2f})"
+    pan_y = f"ih/2-ih/zoom/2+10*sin(2*PI*on/{FPS * 7}+{phase:.2f})"
     vf = (
-        "[0:v]scale=1080:1920,format=rgba[bg];"
-        f"[1:v]scale=w='360+6*sin(2*PI*t/4)':h='360+6*sin(2*PI*t/4)':eval=frame,format=rgba[obj];"
-        f"[bg][obj]overlay=x='{movement}':y='{vertical}':shortest=1,"
+        f"[0:v]scale={WIDTH}:{HEIGHT},zoompan=z='{zoom}':x='{pan_x}':y='{pan_y}':d=1:s={WIDTH}x{HEIGHT}:fps={FPS},setsar=1,format=rgba[art];"
+        "[art][1:v]overlay=x=0:y=0:shortest=1,"
         "fade=t=in:st=0:d=0.22,"
         f"fade=t=out:st={max(0.1, duration - 0.25):.3f}:d=0.25,format=yuv420p[v]"
     )
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-loop", "1", "-framerate", str(FPS), "-i", str(base),
-        "-loop", "1", "-framerate", str(FPS), "-i", str(object_path),
+        "-loop", "1", "-framerate", str(FPS), "-i", str(art_path),
+        "-loop", "1", "-framerate", str(FPS), "-i", str(text_path),
         "-t", f"{duration:.3f}", "-filter_complex", vf,
         "-map", "[v]", "-an", "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast",
         "-crf", "22", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
@@ -579,11 +619,11 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
     durations = [audio_duration * weight / sum(weights[:spoken_scenes]) for weight in weights[:spoken_scenes]]
     durations.append(closing_duration)
     segments: list[Path] = []
+    art_background = make_illustration_background(work, item)
     for index, scene in enumerate(scenes):
-        base = make_background(work, item, scene, index, len(scenes))
-        obj = make_object(work, item, scene, index)
+        text_overlay = make_background(work, item, scene, index, len(scenes))
         output = work / f"clip-{index:02d}.mp4"
-        make_clip_scene(base, obj, output, durations[index], index)
+        make_clip_scene(art_background, text_overlay, output, durations[index], index)
         segments.append(output)
 
     concat_list = work / "concat.txt"
