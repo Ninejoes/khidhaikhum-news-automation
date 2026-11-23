@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import argparse
+import resource
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -390,13 +392,15 @@ def synthesize(script: str, path: Path) -> None:
     acoustic_model = Path(os.environ.get("VOXCPM2_ACOUSTIC_MODEL", ROOT / "models/VoxCPM2-Acoustic-F16.gguf"))
     missing = [str(path) for path in (cli, base_model, acoustic_model) if not path.is_file()]
     if missing:
-        raise RuntimeError("VoxCPM2 Metal renderer files are missing: " + ", ".join(missing))
+        raise RuntimeError("VoxCPM2 renderer files are missing: " + ", ".join(missing))
     direction = "(A calm, warm, low-pitched adult Thai male news anchor; clear native Thai pronunciation, pleasant steady pace, confident and natural.)"
     command = [
         str(cli), "--text", f"{direction}{script}", "--output", str(path),
         "--cfg", "2.0", "--timesteps", "6", "--seed", "42",
         str(base_model), str(acoustic_model),
     ]
+    if os.environ.get("VOXCPM2_USE_CPU", "").strip().lower() in {"1", "true", "yes"}:
+        command.insert(1, "--cpu")
     log_path = path.parent / "voxcpm2-render.log"
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, text=True)
@@ -405,8 +409,20 @@ def synthesize(script: str, path: Path) -> None:
             time.sleep(30)
             if process.poll() is None:
                 elapsed = int(time.monotonic() - started)
-                print(f"VoxCPM2 Metal narration is running ({elapsed}s).", flush=True)
+                print(f"VoxCPM2 narration is running ({elapsed}s).", flush=True)
         if process.returncode:
+            diagnostics = log_path.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"out of memory|memory allocation|failed to allocate|std::bad_alloc|not enough memory", diagnostics, re.I):
+                category = "memory allocation"
+            elif re.search(r"metal.*(?:error|failed|failure)|(?:error|failed|failure).*metal", diagnostics, re.I):
+                category = "Metal backend"
+            elif re.search(r"assertion|GGML_ASSERT|abort trap", diagnostics, re.I):
+                category = "native assertion"
+            else:
+                category = "no safe diagnostic string"
+            peak_rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+            peak_mib = peak_rss / (1024 * 1024 if sys.platform == "darwin" else 1024)
+            print(f"VoxCPM2 failed (exit {process.returncode}, peak resident ~{peak_mib:.0f} MiB, diagnostic: {category}).", flush=True)
             raise RuntimeError(f"VoxCPM2 narration failed with exit {process.returncode}")
     if not path.is_file() or path.stat().st_size < 100_000:
         raise RuntimeError("VoxCPM2 did not produce a usable WAV file")
