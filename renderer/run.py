@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
@@ -386,7 +387,67 @@ def make_clip_scene(base: Path, object_path: Path, output: Path, duration: float
     subprocess.run(command, check=True, capture_output=True, text=True)
 
 
-def synthesize(script: str, path: Path) -> None:
+def synthesize_gemini(script: str, path: Path) -> None:
+    api_key = required_env("GEMINI_API_KEY")
+    model = os.environ.get("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts").strip()
+    voice = os.environ.get("GEMINI_TTS_VOICE", "Charon").strip()
+    style = (
+        "A calm, warm, low-pitched adult Thai male news anchor; "
+        "clear Thai pronunciation, steady pace, confident and natural."
+    )
+    request_body = {
+        "model": model,
+        "input": [{
+            "type": "user_input",
+            "content": [{
+                "type": "text",
+                "text": script,
+                "annotations": [{"type": "speech_metadata", "style": style}],
+            }],
+        }],
+        "response_format": {"type": "audio"},
+        "generation_config": {"speech_config": [{"voice": voice}]},
+    }
+    try:
+        response = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/interactions",
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json=request_body,
+            timeout=(15, 180),
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError("Gemini TTS request failed before an audio response was received") from exc
+    if not response.ok:
+        raise RuntimeError(f"Gemini TTS returned HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Gemini TTS returned an invalid response") from exc
+
+    encoded_audio = (payload.get("output_audio") or {}).get("data")
+    if not encoded_audio:
+        for step in reversed(payload.get("steps") or []):
+            if step.get("type") != "model_output":
+                continue
+            for part in step.get("content") or []:
+                if part.get("type") == "audio" and part.get("data"):
+                    encoded_audio = part["data"]
+                    break
+            if encoded_audio:
+                break
+    if not encoded_audio:
+        raise RuntimeError("Gemini TTS response did not contain audio")
+    try:
+        audio = base64.b64decode(encoded_audio, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Gemini TTS returned audio in an invalid format") from exc
+    if not audio.startswith(b"RIFF") or len(audio) < 100_000:
+        raise RuntimeError("Gemini TTS did not return a usable WAV file")
+    path.write_bytes(audio)
+    print(f"Gemini TTS narration created ({len(audio)} bytes).", flush=True)
+
+
+def synthesize_voxcpm2(script: str, path: Path) -> None:
     cli = Path(os.environ.get("VOXCPM2_CLI", ROOT / "third_party/llama.cpp-omni/build/bin/voxcpm2-cli"))
     base_model = Path(os.environ.get("VOXCPM2_BASE_MODEL", ROOT / "models/VoxCPM2-BaseLM-Q8_0.gguf"))
     acoustic_model = Path(os.environ.get("VOXCPM2_ACOUSTIC_MODEL", ROOT / "models/VoxCPM2-Acoustic-F16.gguf"))
@@ -429,6 +490,16 @@ def synthesize(script: str, path: Path) -> None:
             raise RuntimeError(f"VoxCPM2 narration failed with exit {process.returncode}")
     if not path.is_file() or path.stat().st_size < 100_000:
         raise RuntimeError("VoxCPM2 did not produce a usable WAV file")
+
+
+def synthesize(script: str, path: Path) -> None:
+    provider = os.environ.get("TTS_PROVIDER", "voxcpm2").strip().lower()
+    if provider == "gemini":
+        synthesize_gemini(script, path)
+    elif provider == "voxcpm2":
+        synthesize_voxcpm2(script, path)
+    else:
+        raise RuntimeError("TTS_PROVIDER must be 'gemini' or 'voxcpm2'")
 
 
 def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = None) -> Path:

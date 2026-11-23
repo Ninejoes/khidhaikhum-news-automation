@@ -30,8 +30,8 @@ concurrency:
 jobs:
   render-and-publish:
     if: github.ref == 'refs/heads/main'
-    runs-on: macos-15
-    timeout-minutes: 110
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out publisher
         uses: actions/checkout@v4
@@ -40,14 +40,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install rendering tools and Thai font
         run: |
-          brew list --versions ffmpeg >/dev/null 2>&1 || brew install ffmpeg
-          brew list --versions cairo >/dev/null 2>&1 || brew install cairo
-          brew list --versions fontconfig >/dev/null 2>&1 || brew install fontconfig
-          brew list --cask --versions font-noto-sans-thai >/dev/null 2>&1 || brew install --cask font-noto-sans-thai
-          fc-cache -f
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libcairo2 fontconfig fonts-noto-core
           ffmpeg -version >/dev/null
           fc-match 'Noto Sans Thai' -f '%{file}\n'
 
@@ -57,54 +56,18 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/pip install -r requirements.txt
 
-      - name: Fetch pinned VoxCPM2 renderer source
-        run: |
-          mkdir -p third_party/llama.cpp-omni
-          git -C third_party/llama.cpp-omni init
-          git -C third_party/llama.cpp-omni remote add origin https://github.com/tc-mb/llama.cpp-omni.git
-          git -C third_party/llama.cpp-omni fetch --depth=1 origin 3dfca43b3b047ba1b6c64a76172aefe9c4f8a33d
-          git -C third_party/llama.cpp-omni checkout --detach FETCH_HEAD
-
-      - name: Restore VoxCPM2 build cache
-        uses: actions/cache@v4
-        with:
-          path: third_party/llama.cpp-omni/build
-          key: voxcpm2-metal-macos15-3dfca43-v1
-
-      - name: Build VoxCPM2 Metal renderer
-        id: build-voxcpm2
-        run: |
-          cmake -S third_party/llama.cpp-omni -B third_party/llama.cpp-omni/build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_METAL=ON \
-            -DGGML_METAL_EMBED_LIBRARY=ON \
-            -DGGML_BLAS=ON \
-            -DGGML_BLAS_VENDOR=Apple \
-            -DENABLE_COREML=ON \
-            -DLLAMA_BUILD_TESTS=OFF
-          cmake --build third_party/llama.cpp-omni/build --target voxcpm2-cli -j 3
-
-      - name: Restore VoxCPM2 model cache
-        uses: actions/cache@v4
-        with:
-          path: models
-          key: voxcpm2-models-v2
-
-      - name: Download VoxCPM2 models when needed
-        id: download-models
-        run: .venv/bin/python renderer/download_voxcpm2.py
-
       - name: Render and validate without posting
         if: github.event_name == 'workflow_dispatch' && inputs.publish != true
         env:
           NEWSROOM_URL: ${{ secrets.NEWSROOM_URL }}
           AUTO_PUBLISH_SECRET: ${{ secrets.AUTO_PUBLISH_SECRET }}
           SIWC_BYPASS_TOKEN: ${{ secrets.SIWC_BYPASS_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TTS_PROVIDER: gemini
+          GEMINI_TTS_MODEL: gemini-3.8-flash-tts
+          GEMINI_TTS_VOICE: Charon
           REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
-          VOXCPM2_USE_CPU: '1'
-          VOXCPM2_TIMESTEPS: '3'
-          VOXCPM2_CLI: ${{ github.workspace }}/third_party/llama.cpp-omni/build/bin/voxcpm2-cli
-        run: DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix cairo)/lib" .venv/bin/python renderer/run.py --render-only
+        run: .venv/bin/python renderer/run.py --render-only
 
       - name: Render and publish to Facebook
         if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
@@ -112,25 +75,12 @@ jobs:
           NEWSROOM_URL: ${{ secrets.NEWSROOM_URL }}
           AUTO_PUBLISH_SECRET: ${{ secrets.AUTO_PUBLISH_SECRET }}
           SIWC_BYPASS_TOKEN: ${{ secrets.SIWC_BYPASS_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TTS_PROVIDER: gemini
+          GEMINI_TTS_MODEL: gemini-3.8-flash-tts
+          GEMINI_TTS_VOICE: Charon
           REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
-          VOXCPM2_USE_CPU: '1'
-          VOXCPM2_TIMESTEPS: '3'
-          VOXCPM2_CLI: ${{ github.workspace }}/third_party/llama.cpp-omni/build/bin/voxcpm2-cli
-        run: DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix cairo)/lib" .venv/bin/python renderer/run.py
-
-      - name: Save build cache
-        if: always() && steps.build-voxcpm2.outcome == 'success'
-        uses: actions/cache/save@v4
-        with:
-          path: third_party/llama.cpp-omni/build
-          key: voxcpm2-metal-macos15-3dfca43-v1
-
-      - name: Save model cache
-        if: always() && steps.download-models.outcome == 'success'
-        uses: actions/cache/save@v4
-        with:
-          path: models
-          key: voxcpm2-models-v2
+        run: .venv/bin/python renderer/run.py
 
       - name: Remove temporary media and logs
         if: always()
