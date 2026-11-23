@@ -14,17 +14,27 @@ FILES = {
     "VoxCPM2-BaseLM-Q8_0.gguf": 1_727_309_920,
     "VoxCPM2-Acoustic-F16.gguf": 1_825_096_352,
 }
-CHUNK_SIZE = 64 * 1024 * 1024
+CHUNK_SIZE = 16 * 1024 * 1024
+MAX_RETRIES = 8
 
 
 def fetch(name: str, expected_size: int) -> None:
     destination = MODEL_DIR / name
     if destination.exists() and destination.stat().st_size == expected_size:
-        print(f"Already complete: {name}", flush=True)
-        return
-    destination.unlink(missing_ok=True)
+        with destination.open("rb") as model:
+            if model.read(4) == b"GGUF":
+                print(f"Already complete: {name}", flush=True)
+                return
+    offset = destination.stat().st_size if destination.exists() else 0
+    if offset > expected_size or (offset and offset % CHUNK_SIZE != 0):
+        destination.unlink(missing_ok=True)
+        offset = 0
+    if offset:
+        with destination.open("rb") as model:
+            if model.read(4) != b"GGUF":
+                destination.unlink(missing_ok=True)
+                offset = 0
     url = f"https://huggingface.co/{REPO}/resolve/main/{name}"
-    offset = 0
     retries = 0
     while offset < expected_size:
         end = min(offset + CHUNK_SIZE, expected_size) - 1
@@ -34,7 +44,7 @@ def fetch(name: str, expected_size: int) -> None:
                 url,
                 headers={"Range": f"bytes={offset}-{end}"},
                 stream=True,
-                timeout=(30, 120),
+                timeout=(20, 90),
             ) as response:
                 if response.status_code != 206:
                     raise RuntimeError(f"Expected HTTP 206 for byte range, got {response.status_code}")
@@ -57,12 +67,17 @@ def fetch(name: str, expected_size: int) -> None:
             offset = end + 1
             retries = 0
             print(f"{name}: {offset:,}/{expected_size:,} bytes", flush=True)
-        except Exception:
+        except Exception as error:
             part.unlink(missing_ok=True)
             retries += 1
-            if retries > 5:
-                raise
-            time.sleep(min(2**retries, 30))
+            if retries >= MAX_RETRIES:
+                raise RuntimeError(
+                    f"Model download failed for {name} at byte range {offset}-{end} "
+                    f"after {MAX_RETRIES} attempts ({type(error).__name__})"
+                ) from error
+            delay = min(2**retries, 30)
+            print(f"Temporary download failure for {name}; retry {retries}/{MAX_RETRIES} in {delay}s", flush=True)
+            time.sleep(delay)
     if destination.stat().st_size != expected_size:
         raise RuntimeError(f"Model size mismatch for {name}")
     with destination.open("rb") as model:

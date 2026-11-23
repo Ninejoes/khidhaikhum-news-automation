@@ -65,6 +65,7 @@ jobs:
           key: voxcpm2-metal-macos15-3dfca43-v1
 
       - name: Build VoxCPM2 Metal renderer
+        id: build-voxcpm2
         run: |
           cmake -S third_party/llama.cpp-omni -B third_party/llama.cpp-omni/build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -80,9 +81,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models
-          key: voxcpm2-models-v1
+          key: voxcpm2-models-v2
 
       - name: Download VoxCPM2 models when needed
+        id: download-models
         run: .venv/bin/python renderer/download_voxcpm2.py
 
       - name: Render and validate without posting
@@ -106,18 +108,18 @@ jobs:
         run: DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix cairo)/lib" .venv/bin/python renderer/run.py
 
       - name: Save build cache
-        if: always()
+        if: always() && steps.build-voxcpm2.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: third_party/llama.cpp-omni/build
           key: voxcpm2-metal-macos15-3dfca43-v1
 
       - name: Save model cache
-        if: always()
+        if: always() && steps.download-models.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: models
-          key: voxcpm2-models-v1
+          key: voxcpm2-models-v2
 
       - name: Remove temporary media and logs
         if: always()
