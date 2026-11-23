@@ -2,7 +2,8 @@ name: News Reel worker
 
 on:
   schedule:
-    - cron: '25 1,3,5,7,9,11,13,15 * * *'
+    - cron: '25 8,10,12,14,16,18,20,22 * * *'
+      timezone: Asia/Bangkok
   workflow_dispatch:
     inputs:
       mode:
