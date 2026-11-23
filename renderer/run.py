@@ -223,6 +223,7 @@ def draw_wrapped(draw: ImageDraw.ImageDraw, text: str, xy: tuple[int, int], sele
 def topic_for(text: str) -> tuple[str, tuple[int, int, int]]:
     value = text.lower()
     checks = [
+        (("ศาล", "อุทธรณ์", "ยุติธรรม", "มาตรา 112", "กฎหมาย"), ("กฎหมาย", (151, 188, 211))),
         (("น้ำท่วม", "น้ำป่า", "น้ำหลาก", "ฝนตก", "อากาศ", "พายุ", "มรสุม", "คลื่น"), ("สภาพอากาศ", (99, 190, 215))),
         (("อาชญาก", "ตำรวจ", "คดี", "จับกุม", "ผู้ต้องหา", "เหตุการณ์", "อุบัติเหตุ", "ภัยพิบัติ"), ("เหตุการณ์", (242, 142, 113))),
         (("กีฬา", "ฟุตบอล", "บาส", "นักกีฬา", "ทีมชาติ", "พรีเมียร์ลีก", "แชมป์"), ("กีฬา", (111, 189, 166))),
@@ -347,11 +348,13 @@ def summary_metrics(item: dict) -> list[dict[str, str]]:
 
 
 def illustration_asset(item: dict, scene: dict | None = None) -> Path:
+    theme_parts = [clean_text(item.get(key), 1000) for key in ("category", "title", "summary")]
     if scene:
-        theme_text = " ".join(clean_text(scene.get(key), 1000) for key in ("title", "body")).lower()
-    else:
-        theme_text = " ".join(clean_text(item.get(key), 1000) for key in ("category", "title")).lower()
-    if re.search(r"พันธบัตร|ตราสารหนี้|bond|ออมทรัพย์", theme_text):
+        theme_parts.extend(clean_text(scene.get(key), 1000) for key in ("title", "body"))
+    theme_text = " ".join(theme_parts).lower()
+    if re.search(r"ศาล|อุทธรณ์|ยุติธรรม|มาตรา\s*112|กฎหมาย|รัฐสภา|\bcourt\b|\blaw\b", theme_text):
+        name = "thai-court.jpg"
+    elif re.search(r"พันธบัตร|ตราสารหนี้|bond|ออมทรัพย์", theme_text):
         name = "bonds-civic.jpg"
     elif re.search(r"ทองคำ?|gold|โลหะมีค่า", theme_text):
         name = "gold-vault.jpg"
@@ -362,6 +365,8 @@ def illustration_asset(item: dict, scene: dict | None = None) -> Path:
 
 def illustration_icon(item: dict, scene: dict | None = None) -> tuple[str, tuple[int, int, int]]:
     asset = illustration_asset(item, scene).stem
+    if asset == "thai-court":
+        return "landmark", (173, 203, 218)
     if asset == "gold-vault":
         return "hand-coins", (235, 197, 118)
     if asset == "bonds-civic":
@@ -406,6 +411,7 @@ def make_foreground_art(path: Path, item: dict, scene: dict, scene_index: int, h
         "market-bangkok": (0.68, 0.72),
         "gold-vault": (0.68, 0.75),
         "bonds-civic": (0.67, 0.81),
+        "thai-court": (0.68, 0.70),
     }
     photo = ImageOps.fit(source, (764, height - 36), method=Image.Resampling.LANCZOS,
                          centering=centers.get(asset_name, (0.5, 0.68))).convert("RGBA")
@@ -692,7 +698,7 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render verified Thai news Reels")
     parser.add_argument("--item-file", type=Path, help="Render a saved newsroom item JSON instead of polling the online queue")
-    parser.add_argument("--output", type=Path, help="Output MP4 path for local rendering")
+    parser.add_argument("--output", type=Path, help="Output MP4 path for local or render-only output")
     parser.add_argument("--audio-file", type=Path, help="Reuse a narration file when reviewing visuals locally")
     parser.add_argument("--mode", choices=["summary", "breaking"], default="summary")
     parser.add_argument("--render-only", action="store_true", help="Render and validate one queued item without publishing it")
@@ -776,6 +782,11 @@ def main() -> None:
             raise RuntimeError("Rendered video failed the duration or upload-size check")
         print(f"Render validated: {duration:.1f}s, {size:,} bytes.")
         if args.render_only:
+            if args.output:
+                output = args.output.expanduser().resolve()
+                output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(video, output)
+                print(f"Rendered preview saved: {output}", flush=True)
             print("Render-only mode; Facebook upload skipped.")
             return
         with video.open("rb") as handle:

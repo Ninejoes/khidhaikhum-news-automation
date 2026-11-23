@@ -79,7 +79,16 @@ jobs:
           GEMINI_TTS_VOICE: Charon
           REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
           REQUESTED_ITEM_ID: ${{ inputs.item_id || '' }}
-        run: .venv/bin/python renderer/run.py --render-only
+        run: .venv/bin/python renderer/run.py --render-only --output outputs/news-reel.mp4
+
+      - name: Upload rendered video preview
+        if: github.event_name == 'workflow_dispatch' && inputs.publish != true && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-reel-preview
+          path: outputs/news-reel.mp4
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Render and publish to Facebook
         if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish == true)
@@ -99,5 +108,6 @@ jobs:
       - name: Remove temporary media and logs
         if: always()
         run: |
+          rm -rf outputs
           rm -rf renderer/work
           find "${TMPDIR:-/tmp}" -maxdepth 1 -type d -name 'khidhaikhum-news-*' -exec rm -rf {} +
