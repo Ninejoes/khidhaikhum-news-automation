@@ -718,6 +718,9 @@ def main() -> None:
     siwc_token = required_env("SIWC_BYPASS_TOKEN")
     mode = pick_mode()
     retry_item_id = os.environ.get("RETRY_ITEM_ID", "").strip()
+    requested_item_id = os.environ.get("REQUESTED_ITEM_ID", "").strip()
+    if retry_item_id and requested_item_id:
+        raise RuntimeError("Choose either a retry item or a direct item ID, not both")
     headers = {
         "Authorization": f"Bearer {secret}",
         "OAI-Sites-Authorization": f"Bearer {siwc_token}",
@@ -735,18 +738,25 @@ def main() -> None:
         print("The saved item was explicitly re-queued for this publish attempt.", flush=True)
 
     queue_params = {"mode": mode}
-    if retry_item_id:
-        queue_params["itemId"] = retry_item_id
+    if retry_item_id or requested_item_id:
+        queue_params["itemId"] = retry_item_id or requested_item_id
     queue = requests.get(f"{base_url}/api/automation/queue", params=queue_params, headers=headers, timeout=25)
     queue.raise_for_status()
     data = queue.json()
     items = data.get("items") or []
     if not items:
-        print(f"No eligible {mode} news item; nothing was posted.")
+        target = retry_item_id or requested_item_id
+        if target:
+            print(f"No eligible {mode} news item for the requested ID; nothing was posted.")
+        else:
+            print(f"No eligible {mode} news item; nothing was posted.")
         return
 
     item = items[0]
-    print(f"Rendering verified {mode} item.")
+    target = retry_item_id or requested_item_id
+    if target and str(item.get("id")) != target:
+        raise RuntimeError("Newsroom returned a different item than the requested ID; nothing was posted")
+    print(f"Rendering verified {mode} item: {clean_text(item.get('title'), 180)}.", flush=True)
     with tempfile.TemporaryDirectory(prefix="khidhaikhum-news-") as temporary:
         video = build_video(item, mode, Path(temporary))
         probe = subprocess.run(

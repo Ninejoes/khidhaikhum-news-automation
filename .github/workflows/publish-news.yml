@@ -24,6 +24,11 @@ on:
         type: string
         default: ''
         required: false
+      item_id:
+        description: Target one exact verified newsroom item instead of selecting the queue's newest item
+        type: string
+        default: ''
+        required: false
 
 permissions:
   contents: read
@@ -73,6 +78,7 @@ jobs:
           GEMINI_TTS_MODEL: gemini-3.8-flash-tts
           GEMINI_TTS_VOICE: Charon
           REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
+          REQUESTED_ITEM_ID: ${{ inputs.item_id || '' }}
         run: .venv/bin/python renderer/run.py --render-only
 
       - name: Render and publish to Facebook
@@ -87,6 +93,7 @@ jobs:
           GEMINI_TTS_VOICE: Charon
           REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
           RETRY_ITEM_ID: ${{ inputs.retry_item_id || '' }}
+          REQUESTED_ITEM_ID: ${{ inputs.item_id || '' }}
         run: .venv/bin/python renderer/run.py
 
       - name: Remove temporary media and logs
