@@ -390,13 +390,16 @@ def synthesize(script: str, path: Path) -> None:
     cli = Path(os.environ.get("VOXCPM2_CLI", ROOT / "third_party/llama.cpp-omni/build/bin/voxcpm2-cli"))
     base_model = Path(os.environ.get("VOXCPM2_BASE_MODEL", ROOT / "models/VoxCPM2-BaseLM-Q8_0.gguf"))
     acoustic_model = Path(os.environ.get("VOXCPM2_ACOUSTIC_MODEL", ROOT / "models/VoxCPM2-Acoustic-F16.gguf"))
+    timesteps = int(os.environ.get("VOXCPM2_TIMESTEPS", "6"))
+    if not 1 <= timesteps <= 10:
+        raise RuntimeError("VoxCPM2 timesteps must be between 1 and 10")
     missing = [str(path) for path in (cli, base_model, acoustic_model) if not path.is_file()]
     if missing:
         raise RuntimeError("VoxCPM2 renderer files are missing: " + ", ".join(missing))
     direction = "(A calm, warm, low-pitched adult Thai male news anchor; clear native Thai pronunciation, pleasant steady pace, confident and natural.)"
     command = [
         str(cli), "--text", f"{direction}{script}", "--output", str(path),
-        "--cfg", "2.0", "--timesteps", "6", "--seed", "42",
+        "--cfg", "2.0", "--timesteps", str(timesteps), "--seed", "42",
         str(base_model), str(acoustic_model),
     ]
     if os.environ.get("VOXCPM2_USE_CPU", "").strip().lower() in {"1", "true", "yes"}:

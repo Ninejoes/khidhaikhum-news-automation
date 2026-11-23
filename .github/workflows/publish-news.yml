@@ -102,6 +102,7 @@ jobs:
           SIWC_BYPASS_TOKEN: ${{ secrets.SIWC_BYPASS_TOKEN }}
           REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
           VOXCPM2_USE_CPU: '1'
+          VOXCPM2_TIMESTEPS: '3'
           VOXCPM2_CLI: ${{ github.workspace }}/third_party/llama.cpp-omni/build/bin/voxcpm2-cli
         run: DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix cairo)/lib" .venv/bin/python renderer/run.py --render-only
 
@@ -113,6 +114,7 @@ jobs:
           SIWC_BYPASS_TOKEN: ${{ secrets.SIWC_BYPASS_TOKEN }}
           REQUESTED_MODE: ${{ inputs.mode || 'auto' }}
           VOXCPM2_USE_CPU: '1'
+          VOXCPM2_TIMESTEPS: '3'
           VOXCPM2_CLI: ${{ github.workspace }}/third_party/llama.cpp-omni/build/bin/voxcpm2-cli
         run: DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$(brew --prefix cairo)/lib" .venv/bin/python renderer/run.py
 
