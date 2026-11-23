@@ -1,6 +1,8 @@
 name: News Reel worker
 
 on:
+  schedule:
+    - cron: '25 1,3,5,7,9,11,13,15 * * *'
   workflow_dispatch:
     inputs:
       mode:
