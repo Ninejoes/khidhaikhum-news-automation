@@ -59,8 +59,22 @@ def font_path(bold: bool = False) -> str:
     return path
 
 
+def fallback_font_path(bold: bool = False) -> str:
+    path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    if Path(path).exists():
+        return path
+    style = "Bold" if bold else "Regular"
+    result = subprocess.run(["fc-match", f"DejaVu Sans:style={style}", "-f", "%{file}"], check=True, capture_output=True, text=True)
+    path = result.stdout.strip()
+    if not path:
+        raise RuntimeError("Fallback font not found on the online rendering runner")
+    return path
+
+
 FONT_REGULAR = font_path(False)
 FONT_BOLD = font_path(True)
+FONT_FALLBACK_REGULAR = fallback_font_path(False)
+FONT_FALLBACK_BOLD = fallback_font_path(True)
 
 
 def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -72,6 +86,37 @@ def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
         except OSError:
             pass
     return face
+
+
+def fallback_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(FONT_FALLBACK_BOLD if bold else FONT_FALLBACK_REGULAR, size)
+
+
+def _font_for_cluster(cluster: str, thai: ImageFont.FreeTypeFont,
+                      fallback: ImageFont.FreeTypeFont) -> ImageFont.FreeTypeFont:
+    return thai if any("\u0e00" <= char <= "\u0e7f" for char in cluster) else fallback
+
+
+def text_width(text: str, thai: ImageFont.FreeTypeFont,
+               fallback: ImageFont.FreeTypeFont | None = None) -> float:
+    if fallback is None:
+        return thai.getlength(text)
+    return sum(_font_for_cluster(cluster, thai, fallback).getlength(cluster)
+               for cluster in regex.findall(r"\X", text))
+
+
+def draw_text_with_fallback(draw: ImageDraw.ImageDraw, text: str, xy: tuple[float, float],
+                            thai: ImageFont.FreeTypeFont, fallback: ImageFont.FreeTypeFont | None,
+                            fill: tuple[int, int, int, int]) -> float:
+    x, y = xy
+    if fallback is None:
+        draw.text((x, y), text, font=thai, fill=fill, stroke_width=0)
+        return x + thai.getlength(text)
+    for cluster in regex.findall(r"\X", text):
+        selected = _font_for_cluster(cluster, thai, fallback)
+        draw.text((x, y), cluster, font=selected, fill=fill, stroke_width=0)
+        x += selected.getlength(cluster)
+    return x
 
 
 def clean_text(value: object, limit: int = 2000) -> str:
@@ -92,14 +137,16 @@ def short_text(value: object, limit: int) -> str:
     return visible.rstrip(" ,ฯ") + "…"
 
 
-def wrap_text(text: str, selected_font: ImageFont.FreeTypeFont, max_width: int, max_lines: int) -> list[str]:
+def wrap_text(text: str, selected_font: ImageFont.FreeTypeFont, max_width: int, max_lines: int,
+              fallback: ImageFont.FreeTypeFont | None = None) -> list[str]:
+    measure = lambda value: text_width(value, selected_font, fallback)
     words = re.findall(r"\S+", text)
     lines: list[str] = []
     current = ""
     truncated = False
     for word_index, word in enumerate(words):
         candidate = word if not current else f"{current} {word}"
-        if selected_font.getlength(candidate) <= max_width:
+        if measure(candidate) <= max_width:
             current = candidate
             continue
         if current:
@@ -109,9 +156,9 @@ def wrap_text(text: str, selected_font: ImageFont.FreeTypeFont, max_width: int, 
                 truncated = True
                 break
         clusters = regex.findall(r"\X", word)
-        while clusters and selected_font.getlength("".join(clusters)) > max_width:
+        while clusters and measure("".join(clusters)) > max_width:
             cut = len(clusters)
-            while cut > 1 and selected_font.getlength("".join(clusters[:cut])) > max_width:
+            while cut > 1 and measure("".join(clusters[:cut])) > max_width:
                 cut -= 1
             lines.append("".join(clusters[:cut]))
             clusters = clusters[cut:]
@@ -131,11 +178,12 @@ def wrap_text(text: str, selected_font: ImageFont.FreeTypeFont, max_width: int, 
 
 
 def draw_wrapped(draw: ImageDraw.ImageDraw, text: str, xy: tuple[int, int], selected_font: ImageFont.FreeTypeFont,
-                 fill: tuple[int, int, int, int], max_width: int, max_lines: int, spacing: int = 16) -> int:
+                 fill: tuple[int, int, int, int], max_width: int, max_lines: int, spacing: int = 16,
+                 fallback: ImageFont.FreeTypeFont | None = None) -> int:
     x, y = xy
-    lines = wrap_text(text, selected_font, max_width, max_lines)
+    lines = wrap_text(text, selected_font, max_width, max_lines, fallback)
     for line in lines:
-        draw.text((x, y), line, font=selected_font, fill=fill, stroke_width=0)
+        draw_text_with_fallback(draw, line, (x, y), selected_font, fallback, fill)
         box = draw.textbbox((x, y), line, font=selected_font)
         y = box[3] + spacing
     return y
@@ -309,8 +357,8 @@ def make_background(path: Path, item: dict, scene: dict, scene_index: int, scene
     image = Image.alpha_composite(image, glow.filter(ImageFilter.GaussianBlur(155)))
     draw = ImageDraw.Draw(image, "RGBA")
 
-    draw.text((76, 62), "คิดให้คุ้ม", font=font(34, True), fill=(244, 247, 245, 255))
-    draw.text((76, 112), "ข่าวที่ตรวจสอบแล้ว", font=font(21, True), fill=(154, 174, 178, 255))
+    draw_text_with_fallback(draw, "คิดให้คุ้ม", (76, 62), font(34, True), fallback_font(34, True), (244, 247, 245, 255))
+    draw_text_with_fallback(draw, "ข่าวที่ตรวจสอบแล้ว", (76, 112), font(21, True), fallback_font(21, True), (154, 174, 178, 255))
     checked_at = item.get("checkedAt") or item.get("checked_at")
     checked_label = "ตรวจข้อมูลล่าสุด"
     if checked_at:
@@ -319,37 +367,42 @@ def make_background(path: Path, item: dict, scene: dict, scene_index: int, scene
             checked_label = "ตรวจข้อมูล " + checked.strftime("%d %b · %H:%M")
         except ValueError:
             pass
-    draw.text((700, 81), checked_label, font=font(21, True), fill=(178, 194, 197, 255))
+    draw_text_with_fallback(draw, checked_label, (700, 81), font(21, True), fallback_font(21, True), (178, 194, 197, 255))
 
     rounded(draw, (76, 196, 366, 250), 22, (*accent, 28))
     draw.ellipse((97, 216, 113, 232), fill=(*accent, 255))
-    draw.text((129, 205), topic, font=font(24, True), fill=(235, 242, 239, 255))
-    draw.text((920, 210), f"{scene_index + 1:02d}/{scene_count:02d}", font=font(21, True), fill=(158, 179, 183, 255))
+    draw_text_with_fallback(draw, topic, (129, 205), font(24, True), fallback_font(24, True), (235, 242, 239, 255))
+    draw_text_with_fallback(draw, f"{scene_index + 1:02d}/{scene_count:02d}", (920, 210), font(21, True), fallback_font(21, True), (158, 179, 183, 255))
 
     heading = clean_text(scene.get("title"), 150)
     if scene_index == 0:
         heading = re.sub(r"^(?:สรุปข่าว(?:เช้า|เที่ยง|เย็น)?\s*\d{1,2}:\d{2}\s*[—–-]\s*)", "", heading, flags=re.I)
     heading_font = font(68 if scene_index == 0 else 54, True)
-    draw_wrapped(draw, heading, (76, 304), heading_font, (247, 249, 247, 255), 928, 3, spacing=17)
+    draw_wrapped(draw, heading, (76, 304), heading_font, (247, 249, 247, 255), 928, 3,
+                 spacing=17, fallback=fallback_font(heading_font.size, True))
 
     # Keep the visual vocabulary relevant to the story; no stock people and no generic charts.
     takeaway = short_text(item.get("impact") or item.get("summary"), 72)
     if takeaway and scene_index == 0:
         rounded(draw, (76, 1070, 1004, 1246), 25, (17, 31, 37, 208))
-        draw.text((108, 1094), "ประเด็นที่ควรรู้", font=font(23, True), fill=(*accent, 255))
-        draw_wrapped(draw, takeaway, (108, 1138), font(31, True), (228, 236, 233, 255), 852, 2, spacing=10)
+        draw_text_with_fallback(draw, "ประเด็นที่ควรรู้", (108, 1094), font(23, True), fallback_font(23, True), (*accent, 255))
+        draw_wrapped(draw, takeaway, (108, 1138), font(31, True), (228, 236, 233, 255), 852, 2,
+                     spacing=10, fallback=fallback_font(31, True))
 
     body = clean_text(scene.get("body"), 220)
     body_top = 1294 if scene_index == 0 else 1090
     body_start = 1344 if scene_index == 0 else 1140
     body_font = font(40 if scene_index == 0 else 36, False)
     body_lines = 3 if scene_index == 0 else 4
-    draw.text((76, body_top), clean_text(scene.get("label") or "สรุปข่าว", 50),
-              font=font(24, True), fill=(*accent, 255))
-    draw_wrapped(draw, body, (76, body_start), body_font, (243, 246, 244, 255), 928, body_lines, spacing=14)
+    draw_text_with_fallback(draw, clean_text(scene.get("label") or "สรุปข่าว", 50), (76, body_top),
+                            font(24, True), fallback_font(24, True), (*accent, 255))
+    draw_wrapped(draw, body, (76, body_start), body_font, (243, 246, 244, 255), 928, body_lines,
+                 spacing=14, fallback=fallback_font(body_font.size, False))
 
-    draw.text((76, 1740), "แหล่งข่าวและรายละเอียดอยู่ในคำบรรยายโพสต์", font=font(22), fill=(171, 189, 192, 255))
-    draw.text((76, 1792), "เสียงผู้บรรยายสังเคราะห์ด้วย AI", font=font(20, True), fill=(132, 154, 159, 255))
+    draw_text_with_fallback(draw, "แหล่งข่าวและรายละเอียดอยู่ในคำบรรยายโพสต์", (76, 1740),
+                            font(22), fallback_font(22), (171, 189, 192, 255))
+    draw_text_with_fallback(draw, "เสียงผู้บรรยายสังเคราะห์ด้วย AI", (76, 1792),
+                            font(20, True), fallback_font(20, True), (132, 154, 159, 255))
 
     out = path / f"scene-{scene_index:02d}.png"
     image.convert("RGB").save(out, optimize=True)

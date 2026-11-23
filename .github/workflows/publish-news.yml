@@ -51,9 +51,10 @@ jobs:
       - name: Install rendering tools and Thai font
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg libcairo2 fontconfig fonts-noto-core
+          sudo apt-get install -y --no-install-recommends ffmpeg libcairo2 fontconfig fonts-noto-core fonts-dejavu-core
           ffmpeg -version >/dev/null
           fc-match 'Noto Sans Thai' -f '%{file}\n'
+          fc-match 'DejaVu Sans' -f '%{file}\n'
 
       - name: Install Python dependencies
         run: |
