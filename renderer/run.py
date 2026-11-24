@@ -1450,7 +1450,12 @@ def main() -> None:
             response = requests.post(
                 f"{base_url}/api/automation/publish",
                 headers=headers,
-                data={"itemId": str(item["id"]), "width": str(WIDTH), "height": str(HEIGHT)},
+                data={
+                    "itemId": str(item["id"]),
+                    "width": str(WIDTH),
+                    "height": str(HEIGHT),
+                    "sources_json": json.dumps(item.get("sources") or []),
+                },
                 files={"video": ("news-reel.mp4", handle, "video/mp4")},
                 timeout=240,
             )
