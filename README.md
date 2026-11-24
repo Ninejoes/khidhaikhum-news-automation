@@ -11,7 +11,7 @@ The public source contains no newsroom records, generated media, model weights, 
 
 Each installation must supply its own `GEMINI_API_KEY` in that repository's Actions secrets. Forks do not inherit this repository's secret, and the worker never accepts a shared key from a public client.
 
-Scheduled runs post eligible Reels every two hours from 08:25 through 22:25 Bangkok time, after the newsroom collection cycle. Manual runs default to render-only; publishing requires explicitly setting the `publish` input.
+Scheduled runs post eligible Reels every two hours from 08:25 through 22:25 Bangkok time, after the newsroom collection cycle. The GitHub cron is written in UTC (`01:25` through `15:25`) because Bangkok stays at UTC+7 year-round. Manual runs default to render-only; publishing requires explicitly setting the `publish` input.
 
 The Facebook Page token remains encrypted in the private newsroom database. The worker receives only the Site API credentials and Gemini API key as Actions secrets. Do not add secrets to files, workflow logs, issues, or pull requests.
 
