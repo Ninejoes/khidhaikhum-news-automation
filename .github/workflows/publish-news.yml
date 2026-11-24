@@ -144,7 +144,7 @@ jobs:
           retention-days: 1
 
       - name: Render and Publish Whiteboard Explainer to Facebook
-        if: (inputs.mode == 'whiteboard-explainer') && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish == true))
+        if: (github.event_name == 'schedule') || (github.event_name == 'workflow_dispatch' && inputs.publish == true && (inputs.mode == 'whiteboard-explainer' || inputs.mode == 'auto' || inputs.mode == ''))
         env:
           NEWSROOM_URL: ${{ secrets.NEWSROOM_URL }}
           AUTO_PUBLISH_SECRET: ${{ secrets.AUTO_PUBLISH_SECRET }}
@@ -159,7 +159,7 @@ jobs:
           .venv/bin/python main.py --mode explainer $TOPIC_ARG --publish --output outputs/whiteboard-reel.mp4
 
       - name: Render and Publish News Reel to Facebook
-        if: inputs.mode != 'whiteboard-explainer' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish == true))
+        if: github.event_name == 'workflow_dispatch' && inputs.publish == true && (inputs.mode == 'breaking' || inputs.mode == 'summary')
         env:
           NEWSROOM_URL: ${{ secrets.NEWSROOM_URL }}
           AUTO_PUBLISH_SECRET: ${{ secrets.AUTO_PUBLISH_SECRET }}
