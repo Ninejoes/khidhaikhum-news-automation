@@ -310,7 +310,9 @@ def create_scenes(item: dict, mode: str) -> list[dict]:
     category, _ = topic_for(f"{item.get('category','')} {title}")
     scenes: list[dict] = []
     labels = ["ข่าวที่กำลังจับตา", "รายละเอียดที่ยืนยันได้", "ข้อมูลที่ต้องรู้", "ผลกระทบและสิ่งที่ตามมา", "ประเด็นสำคัญ"]
-    for index, chunk in enumerate(chunks[:7]):
+    # Four picture beats keep the Reel paced like a short newsroom segment and
+    # make the per-beat photo requirement achievable with a small photo set.
+    for index, chunk in enumerate(chunks[:4]):
         if index == 0:
             scene_title = title
         elif index - 1 < len(summary_points):
@@ -633,6 +635,7 @@ def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[
     source_rows = item.get("sources") or []
     candidates: list[dict] = []
     seen_image_urls: set[str] = set()
+    seen_final_image_urls: set[str] = set()
     image_types = {"image/jpeg", "image/png", "image/webp"}
     for source_index, source in enumerate(source_rows[:ARTICLE_SOURCE_LIMIT]):
         if not isinstance(source, dict):
@@ -640,9 +643,23 @@ def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[
         source_url = clean_text(source.get("url"), 1000)
         source_name = short_text(source.get("name") or "แหล่งข่าว", 48)
         explicit_image = clean_text(source.get("imageUrl") or source.get("image_url"), 2000)
+        image_source_url = clean_text(source.get("imageSourceUrl") or source.get("image_source_url"), 2000)
         article_title_override = clean_text(source.get("articleTitle") or source.get("article_title"), 300)
         article_description_override = clean_text(source.get("articleDescription") or source.get("article_description"), 600)
         image_alt_override = clean_text(source.get("imageAlt") or source.get("image_alt"), 400)
+        photo_credit = clean_text(source.get("credit"), 160)
+        photo_license = clean_text(source.get("imageLicense") or source.get("image_license"), 180)
+        photo_license_url = clean_text(source.get("imageLicenseUrl") or source.get("image_license_url"), 1000)
+        canonical_license_urls = {
+            "CC BY 4.0": "https://creativecommons.org/licenses/by/4.0/",
+            "CC0 1.0": "https://creativecommons.org/publicdomain/zero/1.0/",
+        }
+        if (source.get("imageReuseAuthorized") is not True or not explicit_image or not image_source_url
+                or not photo_credit or photo_license not in {"CC BY 4.0", "CC0 1.0", "Public Domain"}
+                or not photo_license_url
+                or canonical_license_urls.get(photo_license, photo_license_url) != photo_license_url):
+            print(f"Article photo source {source_index + 1}: reuse permission, credit, or license is missing; skipped.", flush=True)
+            continue
         if re.search(r"history|historical|ประวัติ|ราคาปิด|ย้อนหลัง", f"{source_url} {source_name}", re.I):
             print(f"Article photo source {source_index + 1}: data-history page is not an editorial photo source; skipped.", flush=True)
             continue
@@ -675,9 +692,9 @@ def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[
             if not article_terms.intersection(story_terms):
                 print(f"Article photo source {source_index + 1}: headline does not match the saved story; skipped.", flush=True)
                 continue
-            image_refs = list(parser.image_urls[:4])
-            if explicit_image and explicit_image not in image_refs:
-                image_refs.append(explicit_image)
+            # Use only the exact image URL whose license was recorded. Article
+            # thumbnails and OpenGraph images may have different rights.
+            image_refs = [explicit_image]
             for image_ref in image_refs:
                 image_url = urljoin(article_url, image_ref)
                 if image_url in seen_image_urls:
@@ -685,6 +702,8 @@ def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[
                 seen_image_urls.add(image_url)
                 try:
                     image_bytes, final_image_url, image_type = _fetch_public_https(image_url, image_types, ARTICLE_IMAGE_MAX_BYTES)
+                    if final_image_url in seen_final_image_urls:
+                        continue
                     with Image.open(io.BytesIO(image_bytes)) as raw_image:
                         if raw_image.format not in {"JPEG", "PNG", "WEBP"}:
                             raise ValueError("article image format is not supported")
@@ -695,7 +714,7 @@ def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[
                                              centering=(0.5, 0.45))
                     photo_path = work / f"article-photo-{source_index:02d}-{len(candidates):02d}.jpg"
                     photo.save(photo_path, format="JPEG", quality=88, optimize=True)
-                    credit = clean_text(source.get("credit") or "", 160)
+                    credit = photo_credit
                     if not credit:
                         credit_match = re.search(r"(?:REUTERS|AP|AFP)/[^.]+", image_alt, re.I)
                         credit = short_text(credit_match.group(0).strip() if credit_match else source_name, 54)
@@ -703,12 +722,16 @@ def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[
                         "path": photo_path,
                         "source_name": source_name,
                         "credit": credit,
-                        "source_url": article_url,
+                        "license": photo_license,
+                        "license_url": photo_license_url,
+                        "source_url": image_source_url,
+                        "article_url": article_url,
                         "image_url": final_image_url,
                         "metadata": " ".join((article_title, article_description, image_alt)),
                         "article_terms": article_terms,
                         "image_type": image_type,
                     })
+                    seen_final_image_urls.add(final_image_url)
                     print(f"Article photo ready from source {source_index + 1}.", flush=True)
                     break
                 except Exception as exc:
@@ -719,11 +742,13 @@ def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[
         print("No relevant source-article photo was available; the renderer will show a missing-photo state.", flush=True)
 
     assignments: list[dict | None] = []
-    previous: dict | None = None
     used_candidate_ids: set[int] = set()
     for scene in scenes:
         if clean_text(scene.get("label")) == "ที่มาและความโปร่งใส":
-            assignments.append(previous)
+            # The source close is not another narration beat. Repeating the
+            # last article photo here makes a short reel feel like a frozen
+            # slideshow, so keep the closing card on the topic illustration.
+            assignments.append(None)
             continue
         scene_terms = _article_terms(" ".join((clean_text(scene.get("title"), 180), clean_text(scene.get("body"), 1000))))
         scored = [(len(scene_terms.intersection(candidate["article_terms"])), index, candidate)
@@ -742,8 +767,6 @@ def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[
         else:
             choice = None
         assignments.append(choice)
-        if choice:
-            previous = choice
     return assignments
 
 
@@ -845,9 +868,10 @@ def make_illustration_background(path: Path, item: dict, scene: dict, scene_inde
         alpha = 42 + int(58 * progress)
         shade_draw.line((0, y, WIDTH, y), fill=(3, 10, 19, alpha))
     image = Image.alpha_composite(image, shade)
-    image = _draw_article_inset(image, photo_path, photo_source, topic_for(
-        f"{scene.get('title','')} {scene.get('body','')} {item.get('category','')}"
-    )[1], scene_index, metrics)
+    if clean_text(scene.get("label")) != "ที่มาและความโปร่งใส":
+        image = _draw_article_inset(image, photo_path, photo_source, topic_for(
+            f"{scene.get('title','')} {scene.get('body','')} {item.get('category','')}"
+        )[1], scene_index, metrics)
     output = path / f"illustration-background-{scene_index:02d}.png"
     image.convert("RGB").save(output, optimize=True)
     return output
@@ -1077,7 +1101,39 @@ def synthesize(script: str, path: Path) -> None:
         raise RuntimeError("TTS_PROVIDER must be 'gemini' or 'voxcpm2'")
 
 
-def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = None) -> Path:
+def validate_audio_signal(video: Path) -> None:
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(video), "-map", "0:a:0",
+         "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True,
+    )
+    if result.returncode:
+        raise RuntimeError("Rendered audio could not be measured")
+    output = f"{result.stdout}\n{result.stderr}"
+    mean_match = re.search(r"mean_volume:\s*(-?inf|-?[0-9.]+)\s*dB", output, re.I)
+    peak_match = re.search(r"max_volume:\s*(-?inf|-?[0-9.]+)\s*dB", output, re.I)
+    if not mean_match or not peak_match:
+        raise RuntimeError("Rendered audio volume measurement was incomplete")
+    mean_db = float(mean_match.group(1))
+    peak_db = float(peak_match.group(1))
+    if mean_db < -50 or peak_db < -45:
+        raise RuntimeError("Rendered Reel audio is silent or too quiet to publish")
+    print(f"Audio signal validated: mean {mean_db:.1f} dB, peak {peak_db:.1f} dB.", flush=True)
+
+
+def require_distinct_news_photos(scenes: list[dict], scene_photos: list[dict | None]) -> None:
+    spoken_count = max(0, len(scenes) - 1)
+    spoken_photos = scene_photos[:spoken_count]
+    missing = sum(photo is None for photo in spoken_photos)
+    distinct = {str(photo.get("image_url")) for photo in spoken_photos if photo}
+    if missing or len(distinct) != spoken_count:
+        raise RuntimeError(
+            f"Publish held: {missing} of {spoken_count} narration beats lack a distinct, reuse-authorized news photo."
+        )
+
+
+def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = None,
+                require_editorial_photos: bool = False) -> Path:
     script = clean_text(item.get("script"), 1800)
     if len(script) < 80:
         raise RuntimeError("The saved Thai narration script is too short to publish")
@@ -1093,6 +1149,8 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
     audio_duration = float(json.loads(probe.stdout)["format"]["duration"])
     scenes = create_scenes(item, mode)
     scene_photos = _scene_photo_candidates(item, scenes, work)
+    if require_editorial_photos:
+        require_distinct_news_photos(scenes, scene_photos)
     # Give every visual beat a share of the narration duration, with a short cover and source close.
     weights = [max(1, len(clean_text(scene.get("body")))) for scene in scenes]
     weights[0] += max(1, len(clean_text(item.get("title"))))
@@ -1108,7 +1166,7 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
         backgrounds.append(make_illustration_background(
             work, item, scene, index,
             photo_path=photo["path"] if photo else None,
-            photo_source=photo["credit"] if photo else "ไม่พบภาพจากแหล่งอ้างอิง",
+            photo_source=f"{photo['credit']} · {photo['license']}" if photo else "ไม่พบภาพจากแหล่งอ้างอิง",
             metrics=scene_metrics(item, scene) if not photo else [],
         ))
         overlays.append(make_background(work, item, scene, index, len(scenes)))
@@ -1117,7 +1175,7 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
 
     final = work / "news-reel.mp4"
     attributions = sorted({
-        f"{photo['credit']} | {photo['source_url']} | {photo['image_url']}"
+        f"{photo['credit']} ({photo['license']}) | image source: {photo['source_url']} | license: {photo['license_url']} | article: {photo['article_url']} | image: {photo['image_url']}"
         for photo in scene_photos if photo
     })
     attribution_metadata = short_text("Article images: " + "; ".join(attributions), 1000) if attributions else "No source-article photo was used"
@@ -1127,6 +1185,7 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
         "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
         "-metadata", f"comment={attribution_metadata}", "-movflags", "+faststart", str(final),
     ], check=True, capture_output=True, text=True)
+    validate_audio_signal(final)
     return final
 
 
@@ -1199,7 +1258,9 @@ def main() -> None:
         raise RuntimeError("Newsroom returned a different item than the requested ID; nothing was posted")
     print(f"Rendering verified {mode} item: {clean_text(item.get('title'), 180)}.", flush=True)
     with tempfile.TemporaryDirectory(prefix="khidhaikhum-news-") as temporary:
-        video = build_video(item, mode, Path(temporary))
+        video = build_video(
+            item, mode, Path(temporary), require_editorial_photos=not args.render_only
+        )
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration,size,format_name:stream=codec_type,codec_name,width,height", "-of", "json", str(video)],
             check=True, capture_output=True, text=True,
