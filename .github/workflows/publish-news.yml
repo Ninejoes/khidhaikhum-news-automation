@@ -94,7 +94,7 @@ jobs:
         run: .venv/bin/python renderer/run.py --render-only --output outputs/news-reel.mp4
 
       - name: Upload rendered video preview
-        if: github.event_name == 'workflow_dispatch' && inputs.publish != true && success()
+        if: github.event_name == 'workflow_dispatch' && inputs.publish != true && success() && hashFiles('outputs/news-reel.mp4') != ''
         uses: actions/upload-artifact@v4
         with:
           name: news-reel-preview
