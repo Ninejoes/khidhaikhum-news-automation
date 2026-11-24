@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 import regex
 import requests
+import cairosvg
 from PIL import Image, ImageDraw, ImageFont, ImageOps, features
 
 
@@ -435,6 +436,18 @@ def illustration_icon(item: dict, scene: dict | None = None) -> tuple[str, tuple
         return "hand-coins", (235, 197, 118)
     if asset == "bonds-civic":
         return "landmark", (144, 204, 213)
+    if asset == "weather-bangkok":
+        return "cloud-rain", (99, 190, 215)
+    if asset == "public-safety":
+        return "alert-triangle", (242, 142, 113)
+    if asset == "sports-stadium":
+        return "trophy", (111, 189, 166)
+    if asset == "culture-stage":
+        return "clapperboard", (193, 153, 210)
+    if asset == "technology-data-center":
+        return "cpu", (221, 172, 117)
+    if asset == "civic-policy":
+        return "landmark", (118, 164, 206)
     _, accent = topic_for(clean_text(item.get("category"), 100) + " " + clean_text(item.get("title"), 300))
     return "briefcase-business", accent
 
@@ -872,6 +885,22 @@ def make_illustration_background(path: Path, item: dict, scene: dict, scene_inde
         image = _draw_article_inset(image, photo_path, photo_source, topic_for(
             f"{scene.get('title','')} {scene.get('body','')} {item.get('category','')}"
         )[1], scene_index, metrics)
+        icon_name, icon_accent = illustration_icon(item, scene)
+        icon_path = Path(__file__).resolve().parent / "assets" / "lucide" / f"{icon_name}.svg"
+        if not icon_path.is_file():
+            raise RuntimeError(f"Missing topic SVG icon: {icon_path.name}")
+        icon_svg = icon_path.read_text(encoding="utf-8")
+        icon_color = "#" + "".join(f"{channel:02x}" for channel in icon_accent)
+        icon_svg = icon_svg.replace('stroke="currentColor"', f'stroke="{icon_color}"')
+        icon_png = cairosvg.svg2png(bytestring=icon_svg.encode("utf-8"), output_width=42, output_height=42)
+        with Image.open(io.BytesIO(icon_png)) as rendered_icon:
+            icon = rendered_icon.convert("RGBA")
+        badge = Image.new("RGBA", (76, 76), (0, 0, 0, 0))
+        badge_draw = ImageDraw.Draw(badge, "RGBA")
+        badge_draw.rounded_rectangle((0, 0, 75, 75), radius=22, fill=(5, 15, 23, 222),
+                                     outline=(*icon_accent, 235), width=2)
+        badge.alpha_composite(icon, ((76 - icon.width) // 2, (76 - icon.height) // 2))
+        image.alpha_composite(badge, (RIGHT_EDGE - 14 - badge.width, 674))
     output = path / f"illustration-background-{scene_index:02d}.png"
     image.convert("RGB").save(output, optimize=True)
     return output
