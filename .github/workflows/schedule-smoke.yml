@@ -1,0 +1,20 @@
+name: Temporary schedule smoke check
+
+on:
+  schedule:
+    - cron: '45 1 * * *'
+
+permissions: {}
+
+jobs:
+  verify-scheduler:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Confirm scheduled event reached GitHub runner
+        env:
+          SCHEDULE_EXPRESSION: ${{ github.event.schedule }}
+        run: |
+          echo "Temporary schedule smoke event reached the runner at $(date -u --iso-8601=seconds) UTC"
+          echo "Schedule expression: ${SCHEDULE_EXPRESSION}"
