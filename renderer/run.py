@@ -576,7 +576,7 @@ def _fetch_public_https(url: str, accepted_types: set[str], max_bytes: int,
                 "GET", request_target,
                 headers={
                     "Host": f"[{ascii_hostname}]" if ":" in ascii_hostname else ascii_hostname,
-                    "User-Agent": "ThinkForValueNewsRenderer/1.0",
+                    "User-Agent": "ThinkForValueNewsRenderer/1.0 (https://github.com/Ninejoes/khidhaikhum-news-automation; newsroom@khidhaikhum.local)",
                     "Accept": ", ".join(sorted(accepted_types)),
                     "Accept-Encoding": "identity",
                     "Connection": "close",
@@ -677,21 +677,27 @@ def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[
             print(f"Article photo source {source_index + 1}: data-history page is not an editorial photo source; skipped.", flush=True)
             continue
         try:
-            parser = _ArticleMetaParser()
-            article_url = source_url
-            try:
-                html_bytes, article_url, content_type = _fetch_public_https(
-                    source_url, {"text/html", "application/xhtml+xml"}, ARTICLE_HTML_MAX_BYTES,
-                    truncate_ok=True,
-                )
-                parser.feed(html_bytes.decode("utf-8", errors="replace"))
-            except Exception as page_exc:
-                if not explicit_image or not article_title_override:
-                    raise page_exc
-                print(f"Article photo source {source_index + 1}: using its supplied image link and article title metadata.", flush=True)
-            article_title = parser.title or article_title_override
-            article_description = parser.description or article_description_override
-            image_alt = parser.image_alt or image_alt_override
+            if explicit_image and article_title_override:
+                article_title = article_title_override
+                article_description = article_description_override
+                image_alt = image_alt_override
+                article_url = source_url
+            else:
+                parser = _ArticleMetaParser()
+                article_url = source_url
+                try:
+                    html_bytes, article_url, content_type = _fetch_public_https(
+                        source_url, {"text/html", "application/xhtml+xml"}, ARTICLE_HTML_MAX_BYTES,
+                        truncate_ok=True,
+                    )
+                    parser.feed(html_bytes.decode("utf-8", errors="replace"))
+                except Exception as page_exc:
+                    if not explicit_image or not article_title_override:
+                        raise page_exc
+                    print(f"Article photo source {source_index + 1}: using its supplied image link and article title metadata.", flush=True)
+                article_title = article_title_override or parser.title
+                article_description = article_description_override or parser.description
+                image_alt = image_alt_override or parser.image_alt
             if not article_title and not article_description and not image_alt:
                 print(f"Article photo source {source_index + 1}: no article metadata; skipped.", flush=True)
                 continue
@@ -1228,7 +1234,7 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
     return final
 
 
-def ensure_editorial_photos(item: dict, base_url: str, siwc_token: str) -> dict:
+def ensure_editorial_photos(item: dict, base_url: str, secret: str, siwc_token: str) -> dict:
     existing_sources = item.get("sources") or []
     valid_photos = 0
     for s in existing_sources:
@@ -1290,6 +1296,7 @@ def ensure_editorial_photos(item: dict, base_url: str, siwc_token: str) -> dict:
     ]
 
     mcp_headers = {
+        "Authorization": f"Bearer {secret}",
         "OAI-Sites-Authorization": f"Bearer {siwc_token}",
         "oai-authenticated-user-id": "news-publisher",
         "Content-Type": "application/json",
@@ -1409,7 +1416,7 @@ def main() -> None:
     target = retry_item_id or requested_item_id
     if target and str(item.get("id")) != target:
         raise RuntimeError("Newsroom returned a different item than the requested ID; nothing was posted")
-    item = ensure_editorial_photos(item, base_url, siwc_token)
+    item = ensure_editorial_photos(item, base_url, secret, siwc_token)
     print(f"Rendering verified {mode} item: {clean_text(item.get('title'), 180)} (ID: {item.get('id')}).", flush=True)
     with tempfile.TemporaryDirectory(prefix="khidhaikhum-news-") as temporary:
         video = build_video(
