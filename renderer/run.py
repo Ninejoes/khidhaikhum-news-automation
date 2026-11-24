@@ -1137,6 +1137,14 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
     script = clean_text(item.get("script"), 1800)
     if len(script) < 80:
         raise RuntimeError("The saved Thai narration script is too short to publish")
+
+    # A publish attempt must prove that every narration beat has its own
+    # licensed, relevant news photo before spending a TTS request.
+    scenes = create_scenes(item, mode)
+    scene_photos = _scene_photo_candidates(item, scenes, work)
+    if require_editorial_photos:
+        require_distinct_news_photos(scenes, scene_photos)
+
     audio = work / (f"voice{audio_source.suffix}" if audio_source else "voice.wav")
     if audio_source:
         shutil.copy2(audio_source, audio)
@@ -1147,10 +1155,6 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
         check=True, capture_output=True, text=True,
     )
     audio_duration = float(json.loads(probe.stdout)["format"]["duration"])
-    scenes = create_scenes(item, mode)
-    scene_photos = _scene_photo_candidates(item, scenes, work)
-    if require_editorial_photos:
-        require_distinct_news_photos(scenes, scene_photos)
     # Give every visual beat a share of the narration duration, with a short cover and source close.
     weights = [max(1, len(clean_text(scene.get("body")))) for scene in scenes]
     weights[0] += max(1, len(clean_text(item.get("title"))))
