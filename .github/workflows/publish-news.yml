@@ -79,6 +79,24 @@ jobs:
         run: |
           .venv/bin/python -c "from PIL import features; print('Pillow RAQM:', features.check('raqm')); assert features.check('raqm'), 'Pillow RAQM and FriBiDi are required for Thai text shaping'"
 
+      - name: Verify topic illustration and SVG icon rendering
+        run: |
+          .venv/bin/python - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          from PIL import Image
+          from renderer.run import illustration_icon, make_illustration_background
+
+          item = {"category": "เทคโนโลยีและ AI", "title": "ข่าวชิป AI", "summary": "เทคโนโลยี AI"}
+          scene = {"label": "ข่าวด่วนที่ตรวจสอบแล้ว", "title": "ชิป AI", "body": "ข่าวเทคโนโลยี AI"}
+          assert illustration_icon(item, scene)[0] == "cpu"
+          with TemporaryDirectory(prefix="khidhaikhum-illustration-check-") as temporary:
+              output = make_illustration_background(Path(temporary), item, scene, 0)
+              with Image.open(output) as frame:
+                  assert frame.size == (1080, 1920), f"Unexpected illustration size: {frame.size}"
+          print("Topic illustration and CPU SVG icon rendered at 1080x1920.")
+          PY
+
       - name: Render and validate without posting
         if: github.event_name == 'workflow_dispatch' && inputs.publish != true
         env:
