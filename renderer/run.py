@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import base64
+import http.client
+import ipaddress
+import io
 import json
 import math
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import tempfile
 import argparse
 import resource
 import sys
 import time
+import unicodedata
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 import regex
@@ -31,6 +39,11 @@ VOICE = "th-TH-NiwatNeural"
 ROOT = Path(__file__).resolve().parents[1]
 TZ = ZoneInfo("Asia/Bangkok")
 FONT_LAYOUT = ImageFont.Layout.RAQM if features.check("raqm") else ImageFont.Layout.BASIC
+ARTICLE_SOURCE_LIMIT = 5
+ARTICLE_HTML_MAX_BYTES = 1_048_576
+ARTICLE_IMAGE_MAX_BYTES = 8 * 1_048_576
+ARTICLE_FETCH_TIMEOUT = 5.0
+ARTICLE_MAX_REDIRECTS = 3
 
 
 def required_env(name: str) -> str:
@@ -298,10 +311,15 @@ def create_scenes(item: dict, mode: str) -> list[dict]:
     scenes: list[dict] = []
     labels = ["ข่าวที่กำลังจับตา", "รายละเอียดที่ยืนยันได้", "ข้อมูลที่ต้องรู้", "ผลกระทบและสิ่งที่ตามมา", "ประเด็นสำคัญ"]
     for index, chunk in enumerate(chunks[:7]):
-        scene_title = title if index == 0 else short_text(summary_points[min(index, len(summary_points) - 1)], 58)
+        if index == 0:
+            scene_title = title
+        elif index - 1 < len(summary_points):
+            scene_title = short_text(summary_points[index - 1], 58)
+        else:
+            scene_title = labels[min(index, len(labels) - 1)]
         scenes.append({
             "label": labels[min(index, len(labels) - 1)] if index else ("สรุปประเด็นข่าว" if mode == "summary" else "ข่าวด่วนที่ตรวจสอบแล้ว"),
-            "title": scene_title if index < len(summary_points) else (title if index == 0 else labels[min(index, len(labels) - 1)]),
+            "title": scene_title,
             "body": chunk,
         })
     disclaimer = "เสียงสังเคราะห์ AI · สรุปข่าวเพื่อข้อมูล"
@@ -310,7 +328,7 @@ def create_scenes(item: dict, mode: str) -> list[dict]:
     scenes.append({
         "label": "ที่มาและความโปร่งใส",
         "title": "ตรวจสอบจากหลายแหล่ง",
-        "body": f"ตรวจจาก {len(sources)} แหล่งข่าวอิสระ\n{source_line}\n{disclaimer}",
+        "body": f"อ้างอิง {len(sources)} แหล่งข้อมูล\n{source_line}\n{disclaimer}",
     })
     return scenes
 
@@ -324,7 +342,7 @@ def summary_metrics(item: dict) -> list[dict[str, str]]:
     summary = clean_text(item.get("summary"), 1800)
     result: list[dict[str, str]] = []
     for match in re.finditer(r"(?P<value>-?\d+(?:\.\d+)?\s*%)", summary):
-        left, right = max(0, match.start() - 44), min(len(summary), match.end() + 36)
+        left, right = max(0, match.start() - 120), min(len(summary), match.end() + 40)
         context = summary[left:right]
         value = re.sub(r"\s+", "", match.group("value"))
         if not value.startswith("-") and re.search(r"ลดลง|หดตัว|ติดลบ", summary[max(0, match.start()-14):match.start()]):
@@ -332,17 +350,46 @@ def summary_metrics(item: dict) -> list[dict[str, str]]:
         elif not value.startswith("-") and re.search(r"โต|เพิ่มขึ้น|ขยายตัว", summary[max(0, match.start()-14):match.start()]):
             value = "+" + value
         label = "ตัวเลขสำคัญ"
+        label_candidates: list[tuple[int, int, str]] = []
         for needle, name in [
-            ("Nasdaq", "NASDAQ"), ("S&P 500", "S&P 500"), ("GDP", "GDP ไทย"),
+            ("Nasdaq", "NASDAQ"), ("S&P 500", "S&P 500"), ("Dow Jones", "DOW JONES"),
+            ("Nvidia", "NVIDIA"), ("GDP", "GDP ไทย"),
             ("NPL", "NPL · SME"), ("สินเชื่อ", "สินเชื่อ SME"), ("SME", "SME"),
         ]:
-            if needle.lower() in context.lower():
-                label = name
-                break
+            for named_match in re.finditer(re.escape(needle), context, re.I):
+                absolute_position = left + named_match.start()
+                label_candidates.append((absolute_position, abs(absolute_position - match.start()), name))
+        if label_candidates:
+            preceding = [candidate for candidate in label_candidates if candidate[0] <= match.start()]
+            if preceding:
+                label = max(preceding, key=lambda candidate: candidate[0])[2]
+            else:
+                label = min(label_candidates, key=lambda candidate: candidate[1])[2]
         result.append({"value": value, "label": label, "context": context.strip()})
         if len(result) >= 6:
             break
     return result
+
+
+def scene_metrics(item: dict, scene: dict) -> list[dict[str, str]]:
+    scene_text = " ".join((clean_text(scene.get("title"), 180), clean_text(scene.get("body"), 1000))).lower()
+    scene_terms = _article_terms(scene_text)
+    aliases = {
+        "NASDAQ": ("nasdaq", "แนสแด็ก"),
+        "S&P 500": ("s&p 500", "เอสแอนด์พี 500", "เอสพี 500"),
+        "DOW JONES": ("dow jones", "ดาวโจนส์"),
+        "NVIDIA": ("nvidia", "เอ็นวิเดีย"),
+        "GDP ไทย": ("gdp", "จีดีพี"),
+    }
+    scored: list[tuple[int, dict[str, str]]] = []
+    for metric in summary_metrics(item):
+        terms = _article_terms(f"{metric['label']} {metric['context']}")
+        label_in_scene = any(alias in scene_text for alias in aliases.get(metric["label"], (metric["label"].lower(),)))
+        score = len(scene_terms.intersection(terms)) if label_in_scene else 0
+        if score:
+            scored.append((score, metric))
+    scored.sort(key=lambda row: row[0], reverse=True)
+    return [metric for _, metric in scored[:3]]
 
 
 def illustration_asset(item: dict, scene: dict | None = None) -> Path:
@@ -390,7 +437,399 @@ def illustration_icon(item: dict, scene: dict | None = None) -> tuple[str, tuple
     return "briefcase-business", accent
 
 
-def make_illustration_background(path: Path, item: dict, scene: dict, scene_index: int) -> Path:
+class _ArticleMetaParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.image_urls: list[str] = []
+        self.title = ""
+        self.description = ""
+        self.image_alt = ""
+        self._in_title = False
+        self._title_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): value or "" for key, value in attrs}
+        if tag.lower() == "title":
+            self._in_title = True
+        if tag.lower() == "meta":
+            key = (values.get("property") or values.get("name") or values.get("itemprop") or "").lower()
+            content = values.get("content", "").strip()
+            if key in {"og:image", "og:image:secure_url", "twitter:image", "twitter:image:src", "image"} and content:
+                if content not in self.image_urls:
+                    self.image_urls.append(content)
+            elif key in {"og:title", "twitter:title"} and content and not self.title:
+                self.title = content
+            elif key in {"og:description", "description", "twitter:description"} and content and not self.description:
+                self.description = content
+            elif key == "og:image:alt" and content and not self.image_alt:
+                self.image_alt = content
+        elif tag.lower() == "link" and values.get("rel", "").lower() in {"image_src", "preload"}:
+            href = values.get("href", "").strip()
+            if href and (values.get("as", "").lower() == "image" or values.get("rel", "").lower() == "image_src"):
+                if href not in self.image_urls:
+                    self.image_urls.append(href)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "title":
+            self._in_title = False
+            if not self.title:
+                self.title = " ".join(self._title_parts).strip()
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and data.strip():
+            self._title_parts.append(data.strip())
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection pinned to an already-validated public IP address."""
+
+    def __init__(self, hostname: str, address: str, timeout: float):
+        ca_bundle = requests.certs.where()
+        super().__init__(hostname, port=443, timeout=timeout,
+                         context=ssl.create_default_context(cafile=ca_bundle))
+        self._pinned_address = address
+        self._handoff_response = False
+        self._response_socket = None
+
+    def connect(self) -> None:
+        raw = socket.create_connection((self._pinned_address, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
+
+    def close(self) -> None:
+        if self._handoff_response and self.sock is not None:
+            self._response_socket = self.sock
+            self.sock = None
+            return
+        super().close()
+
+
+def _public_address_for_host(hostname: str) -> str:
+    try:
+        literal = ipaddress.ip_address(hostname)
+        if isinstance(literal, ipaddress.IPv6Address) and literal.ipv4_mapped:
+            literal = literal.ipv4_mapped
+        if not literal.is_global:
+            raise ValueError("non-public IP address")
+        return literal.compressed
+    except ValueError as exc:
+        if str(exc) == "non-public IP address":
+            raise
+
+    records = socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+    addresses: list[str] = []
+    for record in records:
+        raw_address = record[4][0].split("%", 1)[0]
+        address = ipaddress.ip_address(raw_address)
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        if not address.is_global:
+            raise ValueError("hostname resolves to a non-public IP address")
+        if address.compressed not in addresses:
+            addresses.append(address.compressed)
+    if not addresses:
+        raise ValueError("hostname did not resolve to a public IP address")
+    return addresses[0]
+
+
+def _fetch_public_https(url: str, accepted_types: set[str], max_bytes: int,
+                        truncate_ok: bool = False) -> tuple[bytes, str, str]:
+    current = url
+    for redirect_count in range(ARTICLE_MAX_REDIRECTS + 1):
+        parts = urlsplit(current)
+        if parts.scheme.lower() != "https" or not parts.hostname or parts.username or parts.password:
+            raise ValueError("article URL must use HTTPS without credentials")
+        try:
+            port = parts.port
+        except ValueError as exc:
+            raise ValueError("article URL has an invalid port") from exc
+        if port not in (None, 443):
+            raise ValueError("article URL must use the standard HTTPS port")
+        hostname = parts.hostname.rstrip(".")
+        try:
+            ascii_hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError("article URL has an invalid hostname") from exc
+        address = _public_address_for_host(ascii_hostname)
+        request_target = parts.path or "/"
+        if parts.query:
+            request_target += "?" + parts.query
+        connection = _PinnedHTTPSConnection(ascii_hostname, address, timeout=ARTICLE_FETCH_TIMEOUT)
+        deadline = time.monotonic() + ARTICLE_FETCH_TIMEOUT
+        response = None
+        try:
+            connection.request(
+                "GET", request_target,
+                headers={
+                    "Host": f"[{ascii_hostname}]" if ":" in ascii_hostname else ascii_hostname,
+                    "User-Agent": "ThinkForValueNewsRenderer/1.0",
+                    "Accept": ", ".join(sorted(accepted_types)),
+                    "Accept-Encoding": "identity",
+                    "Connection": "close",
+                },
+            )
+            connection._handoff_response = True
+            try:
+                response = connection.getresponse()
+            finally:
+                connection._handoff_response = False
+            if response.status in {301, 302, 303, 307, 308}:
+                location = response.getheader("Location")
+                if not location or redirect_count >= ARTICLE_MAX_REDIRECTS:
+                    raise ValueError("article URL exceeded the safe redirect limit")
+                current = urljoin(current, location)
+                continue
+            if response.status != 200:
+                raise ValueError(f"article image source returned HTTP {response.status}")
+            content_type = (response.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if content_type not in accepted_types:
+                raise ValueError("article source returned an unexpected content type")
+            content_length = response.getheader("Content-Length")
+            if content_length:
+                try:
+                    if int(content_length) > max_bytes and not truncate_ok:
+                        raise ValueError("article image source exceeds the byte limit")
+                except ValueError as exc:
+                    if str(exc) == "article image source exceeds the byte limit":
+                        raise
+            chunks: list[bytes] = []
+            total = 0
+            body_socket = connection.sock or connection._response_socket
+            while True:
+                remaining_bytes = max_bytes - total
+                if remaining_bytes <= 0 and truncate_ok:
+                    break
+                if body_socket is None:
+                    raise ValueError("article connection ended unexpectedly")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("article fetch exceeded its time limit")
+                body_socket.settimeout(remaining)
+                allowance = remaining_bytes if truncate_ok else remaining_bytes + 1
+                chunk = response.read1(min(64 * 1024, max(1, allowance)))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError("article image source exceeds the byte limit")
+                chunks.append(chunk)
+            return b"".join(chunks), current, content_type
+        finally:
+            if response is not None:
+                response.close()
+            connection.close()
+    raise ValueError("article URL exceeded the safe redirect limit")
+
+
+def _article_terms(text: str) -> set[str]:
+    normalized = unicodedata.normalize("NFKC", text).lower()
+    stop_words = {"news", "live", "updates", "report", "reports", "market", "markets", "the", "and", "for", "with", "from", "after", "over", "stock", "stocks", "thai", "bank", "วันนี้", "ข่าว", "ตลาด", "หุ้น", "ไทย", "การ", "และ", "ของ", "เป็น", "ที่", "ใน"}
+    latin = {term for term in re.findall(r"[a-z0-9][a-z0-9.+%-]{2,}", normalized)
+             if term not in stop_words and not term.isdigit()}
+    thai = {term for term in re.findall(r"[\u0e00-\u0e7f]{4,}", normalized) if term not in stop_words}
+    return latin | thai
+
+
+def _scene_photo_candidates(item: dict, scenes: list[dict], work: Path) -> list[dict | None]:
+    source_rows = item.get("sources") or []
+    candidates: list[dict] = []
+    seen_image_urls: set[str] = set()
+    image_types = {"image/jpeg", "image/png", "image/webp"}
+    for source_index, source in enumerate(source_rows[:ARTICLE_SOURCE_LIMIT]):
+        if not isinstance(source, dict):
+            continue
+        source_url = clean_text(source.get("url"), 1000)
+        source_name = short_text(source.get("name") or "แหล่งข่าว", 48)
+        explicit_image = clean_text(source.get("imageUrl") or source.get("image_url"), 2000)
+        article_title_override = clean_text(source.get("articleTitle") or source.get("article_title"), 300)
+        article_description_override = clean_text(source.get("articleDescription") or source.get("article_description"), 600)
+        image_alt_override = clean_text(source.get("imageAlt") or source.get("image_alt"), 400)
+        if re.search(r"history|historical|ประวัติ|ราคาปิด|ย้อนหลัง", f"{source_url} {source_name}", re.I):
+            print(f"Article photo source {source_index + 1}: data-history page is not an editorial photo source; skipped.", flush=True)
+            continue
+        try:
+            parser = _ArticleMetaParser()
+            article_url = source_url
+            try:
+                html_bytes, article_url, content_type = _fetch_public_https(
+                    source_url, {"text/html", "application/xhtml+xml"}, ARTICLE_HTML_MAX_BYTES,
+                    truncate_ok=True,
+                )
+                parser.feed(html_bytes.decode("utf-8", errors="replace"))
+            except Exception as page_exc:
+                if not explicit_image or not article_title_override:
+                    raise page_exc
+                print(f"Article photo source {source_index + 1}: using its supplied image link and article title metadata.", flush=True)
+            article_title = parser.title or article_title_override
+            article_description = parser.description or article_description_override
+            image_alt = parser.image_alt or image_alt_override
+            if not article_title and not article_description and not image_alt:
+                print(f"Article photo source {source_index + 1}: no article metadata; skipped.", flush=True)
+                continue
+            article_terms = _article_terms(" ".join((article_title, article_description, image_alt)))
+            story_terms = _article_terms(" ".join((
+                clean_text(item.get("title"), 180), clean_text(item.get("summary"), 1600),
+                clean_text(item.get("script"), 1800), clean_text(item.get("category"), 100),
+            )))
+            # A source may be in another language. Require a clear headline term overlap
+            # before its OpenGraph image can be used in the reel.
+            if not article_terms.intersection(story_terms):
+                print(f"Article photo source {source_index + 1}: headline does not match the saved story; skipped.", flush=True)
+                continue
+            image_refs = list(parser.image_urls[:4])
+            if explicit_image and explicit_image not in image_refs:
+                image_refs.append(explicit_image)
+            for image_ref in image_refs:
+                image_url = urljoin(article_url, image_ref)
+                if image_url in seen_image_urls:
+                    continue
+                seen_image_urls.add(image_url)
+                try:
+                    image_bytes, final_image_url, image_type = _fetch_public_https(image_url, image_types, ARTICLE_IMAGE_MAX_BYTES)
+                    with Image.open(io.BytesIO(image_bytes)) as raw_image:
+                        if raw_image.format not in {"JPEG", "PNG", "WEBP"}:
+                            raise ValueError("article image format is not supported")
+                        if raw_image.width < 480 or raw_image.height < 270 or raw_image.width * raw_image.height > 30_000_000:
+                            raise ValueError("article image dimensions are outside the accepted range")
+                        raw_image.load()
+                        photo = ImageOps.fit(raw_image.convert("RGB"), (900, 310), method=Image.Resampling.LANCZOS,
+                                             centering=(0.5, 0.45))
+                    photo_path = work / f"article-photo-{source_index:02d}-{len(candidates):02d}.jpg"
+                    photo.save(photo_path, format="JPEG", quality=88, optimize=True)
+                    credit = clean_text(source.get("credit") or "", 160)
+                    if not credit:
+                        credit_match = re.search(r"(?:REUTERS|AP|AFP)/[^.]+", image_alt, re.I)
+                        credit = short_text(credit_match.group(0).strip() if credit_match else source_name, 54)
+                    candidates.append({
+                        "path": photo_path,
+                        "source_name": source_name,
+                        "credit": credit,
+                        "source_url": article_url,
+                        "image_url": final_image_url,
+                        "metadata": " ".join((article_title, article_description, image_alt)),
+                        "article_terms": article_terms,
+                        "image_type": image_type,
+                    })
+                    print(f"Article photo ready from source {source_index + 1}.", flush=True)
+                    break
+                except Exception as exc:
+                    print(f"Article photo candidate from source {source_index + 1} unavailable ({type(exc).__name__}).", flush=True)
+        except Exception as exc:
+            print(f"Article photo source {source_index + 1} unavailable ({type(exc).__name__}).", flush=True)
+    if not candidates:
+        print("No relevant source-article photo was available; the renderer will show a missing-photo state.", flush=True)
+
+    assignments: list[dict | None] = []
+    previous: dict | None = None
+    used_candidate_ids: set[int] = set()
+    for scene in scenes:
+        if clean_text(scene.get("label")) == "ที่มาและความโปร่งใส":
+            assignments.append(previous)
+            continue
+        scene_terms = _article_terms(" ".join((clean_text(scene.get("title"), 180), clean_text(scene.get("body"), 1000))))
+        scored = [(len(scene_terms.intersection(candidate["article_terms"])), index, candidate)
+                  for index, candidate in enumerate(candidates) if index not in used_candidate_ids]
+        best_score = max((entry[0] for entry in scored), default=0)
+        if best_score:
+            matching = [entry for entry in scored if entry[0] == best_score]
+            chosen = matching[(len(assignments) - 1) % len(matching)]
+            choice = chosen[2]
+            used_candidate_ids.add(chosen[1])
+        elif candidates and len(candidates) == 1 and not used_candidate_ids:
+            # Only the first matching beat uses a lone story photo; later beats
+            # get source-derived data graphics or an explicit missing-photo panel.
+            choice = candidates[0]
+            used_candidate_ids.add(0)
+        else:
+            choice = None
+        assignments.append(choice)
+        if choice:
+            previous = choice
+    return assignments
+
+
+def _draw_article_inset(image: Image.Image, photo_path: Path | None, source_name: str,
+                        accent: tuple[int, int, int], scene_index: int,
+                        metrics: list[dict[str, str]] | None = None) -> Image.Image:
+    image = image.convert("RGBA")
+    x0, y0, x1, y1 = SAFE_MARGIN, 650, RIGHT_EDGE, 1025
+    outer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    outer_draw = ImageDraw.Draw(outer, "RGBA")
+    outer_draw.rounded_rectangle((x0, y0 + 10, x1, y1 + 10), radius=28, fill=(0, 0, 0, 145))
+    image = Image.alpha_composite(image, outer)
+    card = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(card, "RGBA")
+    rounded(draw, (x0, y0, x1, y1), 26, (8, 14, 19, 255), (239, 244, 239, 245), 4)
+    rounded(draw, (x0 + 7, y0 + 7, x1 - 7, y1 - 7), 21, (*accent, 255), None, 1)
+    image = Image.alpha_composite(image, card)
+
+    left, top, right, bottom = x0 + 14, y0 + 14, x1 - 14, y1 - 56
+    if photo_path and photo_path.is_file():
+        with Image.open(photo_path) as photo_source:
+            photo = ImageOps.fit(photo_source.convert("RGB"), (right - left, bottom - top),
+                                 method=Image.Resampling.LANCZOS, centering=(0.5, 0.45)).convert("RGBA")
+        mask = Image.new("L", photo.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, photo.width - 1, photo.height - 1), radius=15, fill=255)
+        image.alpha_composite(Image.composite(photo, Image.new("RGBA", photo.size, (0, 0, 0, 0)), mask), (left, top))
+    elif metrics:
+        data_card = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        dd = ImageDraw.Draw(data_card, "RGBA")
+        rounded(dd, (left, top, right, bottom), 15, (9, 21, 29, 250), (216, 181, 113, 220), 2)
+        notice = "ตัวเลขสำคัญจากข่าว"
+        draw_text_with_fallback(dd, notice, (left + 22, top + 18), font(20, True), fallback_font(20, True),
+                                (231, 203, 146, 255))
+        columns = metrics[:3]
+        col_width = (right - left - 36) // max(1, len(columns))
+        for index, metric in enumerate(columns):
+            col_left = left + 18 + index * col_width
+            if index:
+                dd.line((col_left, top + 65, col_left, bottom - 18), fill=(*accent, 100), width=2)
+            value_font = font(50 if len(columns) > 1 else 68, True)
+            value = short_text(metric.get("value"), 14)
+            draw_text_with_fallback(dd, value, (col_left + 14, top + 84), value_font,
+                                    fallback_font(value_font.size, True), (250, 251, 246, 255))
+            draw_text_with_fallback(dd, short_text(metric.get("label"), 18), (col_left + 14, top + 158),
+                                    font(23, True), fallback_font(23, True), (*accent, 255))
+            context = short_text(metric.get("context"), 64 if len(columns) == 1 else 34)
+            draw_wrapped(dd, context, (col_left + 14, top + 199), font(17), (220, 230, 225, 255),
+                         col_width - 28, 3, spacing=8, fallback=fallback_font(17))
+        image = Image.alpha_composite(image, data_card)
+    else:
+        missing = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        md = ImageDraw.Draw(missing, "RGBA")
+        rounded(md, (left, top, right, bottom), 15, (16, 27, 34, 255), (216, 181, 113, 210), 2)
+        icon_x = (left + right) // 2
+        icon_y = top + 95
+        md.rounded_rectangle((icon_x - 28, icon_y - 20, icon_x + 28, icon_y + 22), radius=6,
+                             outline=(218, 230, 225, 220), width=3)
+        md.ellipse((icon_x + 8, icon_y - 11, icon_x + 17, icon_y - 2), fill=(218, 230, 225, 220))
+        md.line((icon_x - 19, icon_y + 14, icon_x - 5, icon_y - 2, icon_x + 6, icon_y + 9,
+                 icon_x + 14, icon_y + 2, icon_x + 23, icon_y + 14), fill=(218, 230, 225, 220), width=3)
+        caption = "ยังไม่มีภาพข่าวจากแหล่งอ้างอิง"
+        selected = font(24, True)
+        caption_width = text_width(caption, selected, fallback_font(24, True))
+        draw_text_with_fallback(ImageDraw.Draw(missing), caption, ((WIDTH - caption_width) / 2, top + 154),
+                                selected, fallback_font(24, True), (237, 239, 230, 255))
+        image = Image.alpha_composite(image, missing)
+
+    footer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    fd = ImageDraw.Draw(footer, "RGBA")
+    if photo_path:
+        photo_kind = "ภาพแฟ้มข่าว" if re.search(r"file\s*photo|ภาพแฟ้ม", source_name, re.I) else "ภาพข่าว"
+        source_label = short_text(f"{photo_kind} · {source_name}", 54)
+    elif metrics:
+        source_label = "กราฟิกข้อมูล · สรุปตลาด"
+    else:
+        source_label = "ไม่พบภาพที่ตรงกับข่าวนี้"
+    draw_text_with_fallback(fd, source_label, (x0 + 20, y1 - 43), font(18, True), fallback_font(18, True),
+                            (237, 241, 235, 255) if photo_path else (226, 204, 155, 255))
+    scene_label = f"ภาพ {scene_index + 1:02d}"
+    draw_text_right(fd, scene_label, x1 - 18, y1 - 43, font(17, True), fallback_font(17, True), (202, 214, 211, 255))
+    return Image.alpha_composite(image, footer)
+
+
+def make_illustration_background(path: Path, item: dict, scene: dict, scene_index: int,
+                                 photo_path: Path | None = None, photo_source: str = "แหล่งข่าว",
+                                 metrics: list[dict[str, str]] | None = None) -> Path:
     source_path = illustration_asset(item, scene)
     if not source_path.is_file():
         raise RuntimeError(f"Missing bundled news illustration: {source_path.name}")
@@ -406,6 +845,9 @@ def make_illustration_background(path: Path, item: dict, scene: dict, scene_inde
         alpha = 42 + int(58 * progress)
         shade_draw.line((0, y, WIDTH, y), fill=(3, 10, 19, alpha))
     image = Image.alpha_composite(image, shade)
+    image = _draw_article_inset(image, photo_path, photo_source, topic_for(
+        f"{scene.get('title','')} {scene.get('body','')} {item.get('category','')}"
+    )[1], scene_index, metrics)
     output = path / f"illustration-background-{scene_index:02d}.png"
     image.convert("RGB").save(output, optimize=True)
     return output
@@ -449,7 +891,7 @@ def make_background(path: Path, item: dict, scene: dict, scene_index: int,
     body_font = font(38, False)
     body_fallback = fallback_font(38, False)
     body_lines = wrap_text(body, body_font, CONTENT_WIDTH - 16, 5, body_fallback)
-    panel_top = 1000
+    panel_top = 1050
     panel_bottom = min(1575, panel_top + 166 + max(1, len(body_lines)) * 62)
     rounded(draw, (SAFE_MARGIN, panel_top, RIGHT_EDGE, panel_bottom), 30,
             (5, 17, 25, 232), (*accent, 118), 2)
@@ -650,6 +1092,7 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
     )
     audio_duration = float(json.loads(probe.stdout)["format"]["duration"])
     scenes = create_scenes(item, mode)
+    scene_photos = _scene_photo_candidates(item, scenes, work)
     # Give every visual beat a share of the narration duration, with a short cover and source close.
     weights = [max(1, len(clean_text(scene.get("body")))) for scene in scenes]
     weights[0] += max(1, len(clean_text(item.get("title"))))
@@ -661,17 +1104,28 @@ def build_video(item: dict, mode: str, work: Path, audio_source: Path | None = N
     backgrounds: list[Path] = []
     overlays: list[Path] = []
     for index, scene in enumerate(scenes):
-        backgrounds.append(make_illustration_background(work, item, scene, index))
+        photo = scene_photos[index] if index < len(scene_photos) else None
+        backgrounds.append(make_illustration_background(
+            work, item, scene, index,
+            photo_path=photo["path"] if photo else None,
+            photo_source=photo["credit"] if photo else "ไม่พบภาพจากแหล่งอ้างอิง",
+            metrics=scene_metrics(item, scene) if not photo else [],
+        ))
         overlays.append(make_background(work, item, scene, index, len(scenes)))
     visual = work / "visual.mp4"
     make_visual_reel(backgrounds, overlays, durations, visual)
 
     final = work / "news-reel.mp4"
+    attributions = sorted({
+        f"{photo['credit']} | {photo['source_url']} | {photo['image_url']}"
+        for photo in scene_photos if photo
+    })
+    attribution_metadata = short_text("Article images: " + "; ".join(attributions), 1000) if attributions else "No source-article photo was used"
     subprocess.run([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(visual), "-i", str(audio),
         "-filter_complex", f"[1:a]aresample=48000,loudnorm=I=-16:TP=-1.5:LRA=11,apad=pad_dur={closing_duration:.1f},afade=t=out:st={max(0.0, spoken_total - 0.2):.3f}:d=0.2[a]",
         "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
-        "-movflags", "+faststart", str(final),
+        "-metadata", f"comment={attribution_metadata}", "-movflags", "+faststart", str(final),
     ], check=True, capture_output=True, text=True)
     return final
 
