@@ -5,6 +5,7 @@ on:
     # Bangkok is UTC+7 year-round. Use UTC explicitly so scheduler behavior
     # does not depend on timezone-aware cron parsing.
     - cron: '25 1,3,5,7,9,11,13,15 * * *'
+    - cron: '45 8 * * *' # 15:45 ICT test trigger
   workflow_dispatch:
     inputs:
       mode:
