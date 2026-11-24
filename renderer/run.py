@@ -40,7 +40,9 @@ VOICE = "th-TH-NiwatNeural"
 ROOT = Path(__file__).resolve().parents[1]
 TZ = ZoneInfo("Asia/Bangkok")
 FONT_LAYOUT = ImageFont.Layout.RAQM if features.check("raqm") else ImageFont.Layout.BASIC
-ARTICLE_SOURCE_LIMIT = 5
+# The newsroom accepts up to eight source rows. Scan all of them so image
+# credits placed after article links still reach the per-scene photo matcher.
+ARTICLE_SOURCE_LIMIT = 8
 ARTICLE_HTML_MAX_BYTES = 1_048_576
 ARTICLE_IMAGE_MAX_BYTES = 35 * 1_048_576
 ARTICLE_FETCH_TIMEOUT = 5.0
