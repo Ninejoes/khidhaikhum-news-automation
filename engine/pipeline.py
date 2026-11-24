@@ -94,11 +94,13 @@ def run_explainer_pipeline(
             )
             dummy_photos = [
                 CuratedPhoto(
-                    title="Original Doodly Whiteboard Vector Art",
+                    local_path=final_output,
+                    image_url="https://creativecommons.org/publicdomain/zero/1.0/",
                     source_url="https://creativecommons.org/publicdomain/zero/1.0/",
                     credit="KhidHaiKhum Whiteboard Engine",
                     license_name="CC0 1.0 Universal",
-                    local_path=final_output,
+                    license_url="https://creativecommons.org/publicdomain/zero/1.0/",
+                    reuse_authorized=True,
                 )
             ]
             post_url = publish_reel(final_output, dummy_story, dummy_photos)
