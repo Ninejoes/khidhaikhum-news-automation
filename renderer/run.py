@@ -42,7 +42,7 @@ TZ = ZoneInfo("Asia/Bangkok")
 FONT_LAYOUT = ImageFont.Layout.RAQM if features.check("raqm") else ImageFont.Layout.BASIC
 ARTICLE_SOURCE_LIMIT = 5
 ARTICLE_HTML_MAX_BYTES = 1_048_576
-ARTICLE_IMAGE_MAX_BYTES = 8 * 1_048_576
+ARTICLE_IMAGE_MAX_BYTES = 35 * 1_048_576
 ARTICLE_FETCH_TIMEOUT = 5.0
 ARTICLE_MAX_REDIRECTS = 3
 
@@ -1278,13 +1278,13 @@ def ensure_editorial_photos(item: dict, base_url: str, secret: str, siwc_token: 
         },
         {
             "name": "ตลาดหลักทรัพย์นิวยอร์ก วอลล์สตรีท",
-            "url": "https://commons.wikimedia.org/wiki/File:Wide-Angle_New_York_Stock_Exchange_(51680640260).jpg",
-            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/6/66/Wide-Angle_New_York_Stock_Exchange_%2851680640260%29.jpg",
-            "imageSourceUrl": "https://commons.wikimedia.org/wiki/File:Wide-Angle_New_York_Stock_Exchange_(51680640260).jpg",
-            "imageAlt": "อาคารตลาดหลักทรัพย์นิวยอร์กบนถนนวอลล์สตรีท สหรัฐอเมริกา",
+            "url": "https://commons.wikimedia.org/wiki/File:New_York_Stock_Exchange_Entrance.jpg",
+            "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/5/55/New_York_Stock_Exchange_Entrance.jpg",
+            "imageSourceUrl": "https://commons.wikimedia.org/wiki/File:New_York_Stock_Exchange_Entrance.jpg",
+            "imageAlt": "ทางเข้าอาคารตลาดหลักทรัพย์นิวยอร์กบนถนนวอลล์สตรีท สหรัฐอเมริกา",
             "articleTitle": "ตลาดหุ้นโลกและวอลล์สตรีทส่งสัญญาณบวก ดัชนี Nikkei และ KOSPI หนุนความเชื่อมั่น",
             "articleDescription": "บรรยากาศการซื้อขายหุ้นฟื้นตัวหลังตลาดหุ้นสหรัฐฯ และความเชื่อมั่นการลงทุนทั่วโลกปรับดีขึ้น",
-            "credit": "Billie Grace Ward / Wikimedia Commons",
+            "credit": "Balon Greyjoy / Wikimedia Commons",
             "imageLicense": "CC0 1.0",
             "imageLicenseUrl": "https://creativecommons.org/publicdomain/zero/1.0/",
             "imageReuseAuthorized": True,
@@ -1454,7 +1454,9 @@ def main() -> None:
                 files={"video": ("news-reel.mp4", handle, "video/mp4")},
                 timeout=240,
             )
-        response.raise_for_status()
+            if not response.ok:
+                print(f"Facebook publish API returned HTTP {response.status_code}: {response.text}", flush=True)
+            response.raise_for_status()
         publish_data = response.json()
         print("Facebook accepted the Reel.", flush=True)
         if isinstance(publish_data, dict) and publish_data.get("postUrl"):
