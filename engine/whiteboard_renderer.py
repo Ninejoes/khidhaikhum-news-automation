@@ -320,13 +320,35 @@ def build_beat_html(
     return html
 
 
+def _split_script_into_chunks(script: str, n: int, fallback: str) -> list[str]:
+    """Splits spoken script into n roughly equal phrase chunks for 3-4s sub-shots."""
+    words = script.split()
+    if not words:
+        return [fallback] * n
+    if len(words) <= n:
+        return [words[i] if i < len(words) else words[-1] for i in range(n)]
+    chunk_size = len(words) / n
+    chunks: list[str] = []
+    for i in range(n):
+        start = int(round(i * chunk_size))
+        end = int(round((i + 1) * chunk_size))
+        piece = " ".join(words[start:end]).strip()
+        chunks.append(piece or fallback)
+    return chunks
+
+
 def render_beat_video_segment(
     beat: ExplainerBeat,
     audio_path: Path,
     output_mp4: Path,
     work_dir: Path,
-) -> Path:
-    """Renders a single synchronized video segment for one beat using Chrome Headless."""
+    topic_title: str = "",
+    topic_category: str = "การเงินและข่าวด่วน",
+    global_shot_start: int = 0,
+) -> tuple[Path, int]:
+    """Renders a synchronized video segment with visual cuts every 3-4 seconds using Chrome Headless."""
+    from engine.visual_scenes import build_subshot_html
+
     work_dir.mkdir(parents=True, exist_ok=True)
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
 
@@ -338,45 +360,50 @@ def render_beat_video_segment(
     duration = float(subprocess.check_output(cmd_probe, text=True).strip())
     beat.duration = duration
 
-    # 2. Split script into 2 subtitle chunks
-    words = beat.spoken_script.split()
-    mid = len(words) // 2
-    sub1_first = " ".join(words[:mid]) if words else beat.title
-    sub1_second = " ".join(words[mid:]) if mid < len(words) else ""
+    # 2. Slice beat into sub-shots of ~3.2 to 3.8 seconds each
+    num_subshots = max(3, int(round(duration / 3.4)))
+    sub_dur = duration / num_subshots
+    sub_texts = _split_script_into_chunks(beat.spoken_script, num_subshots, beat.title)
 
-    # Phase 1 Frame (first half)
-    html_p1 = build_beat_html(
-        beat=beat,
-        subtitle_line1=sub1_first,
-        subtitle_line2="",
-        callouts_visible=1,
-        show_marker=True,
+    frame_inputs: list[str] = []
+    filter_parts: list[str] = []
+    concat_inputs: list[str] = []
+
+    for s_idx in range(num_subshots):
+        g_idx = global_shot_start + s_idx
+        html_frame = build_subshot_html(
+            topic_title=topic_title or beat.title,
+            topic_category=topic_category,
+            beat_id=beat.beat_id,
+            beat_title=beat.title,
+            beat_subtitle=beat.subtitle,
+            callouts=beat.callouts,
+            doodle_name=beat.doodle_name,
+            subtitle_text=sub_texts[s_idx],
+            global_shot_idx=g_idx,
+            subshot_idx=s_idx,
+            total_subshots=num_subshots,
+        )
+        frame_png = work_dir / f"beat_{beat.beat_id}_s{s_idx:02d}.png"
+        render_html_to_png(html_frame, frame_png)
+
+        # Last subshot absorbs any floating-point rounding remainder
+        t_seg = (duration - sub_dur * (num_subshots - 1)) if s_idx == num_subshots - 1 else sub_dur
+        frame_inputs.extend(["-loop", "1", "-t", f"{t_seg:.3f}", "-i", str(frame_png)])
+        filter_parts.append(f"[{s_idx}:v]settb=AVTB,setpts=PTS-STARTPTS[v{s_idx}]")
+        concat_inputs.append(f"[v{s_idx}]")
+
+    audio_input_idx = num_subshots
+    filter_complex = (
+        ";".join(filter_parts)
+        + f";{''.join(concat_inputs)}concat=n={num_subshots}:v=1:a=0[vout];[{audio_input_idx}:a]aresample=48000[aout]"
     )
-    frame1_png = work_dir / f"beat_{beat.beat_id}_p1.png"
-    render_html_to_png(html_p1, frame1_png)
 
-    # Phase 2 Frame (second half - all callouts visible)
-    html_p2 = build_beat_html(
-        beat=beat,
-        subtitle_line1=sub1_first,
-        subtitle_line2=sub1_second,
-        callouts_visible=len(beat.callouts),
-        show_marker=False,
-    )
-    frame2_png = work_dir / f"beat_{beat.beat_id}_p2.png"
-    render_html_to_png(html_p2, frame2_png)
-
-    t1 = duration * 0.45
-    t2 = duration - t1
-
-    # Render beat segment with FFmpeg
     cmd_render = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-loop", "1", "-t", f"{t1:.2f}", "-i", str(frame1_png),
-        "-loop", "1", "-t", f"{t2:.2f}", "-i", str(frame2_png),
+        *frame_inputs,
         "-i", str(audio_path),
-        "-filter_complex",
-        f"[0:v]settb=AVTB,setpts=PTS-STARTPTS[v0];[1:v]settb=AVTB,setpts=PTS-STARTPTS[v1];[v0][v1]concat=n=2:v=1:a=0[vout];[2:a]aresample=48000[aout]",
+        "-filter_complex", filter_complex,
         "-map", "[vout]", "-map", "[aout]",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
         "-c:a", "aac", "-b:a", "192k",
@@ -385,8 +412,11 @@ def render_beat_video_segment(
         str(output_mp4),
     ]
     subprocess.run(cmd_render, check=True)
-    logger.info("Rendered beat [%s] segment: %s (%.1fs)", beat.beat_id, output_mp4, duration)
-    return output_mp4
+    logger.info(
+        "Rendered beat [%s] segment (%d sub-shots @ ~%.1fs each): %s (%.1fs)",
+        beat.beat_id, num_subshots, sub_dur, output_mp4, duration,
+    )
+    return output_mp4, global_shot_start + num_subshots
 
 
 def render_complete_whiteboard_explainer(
@@ -396,16 +426,25 @@ def render_complete_whiteboard_explainer(
     output_mp4: Path,
     work_dir: Path,
 ) -> Path:
-    """Renders all beats with Chrome Headless, concatenates them, and mixes in the lo-fi BGM."""
+    """Renders all beats with 3-4s multi-template cuts via Chrome Headless, concatenates them, and mixes BGM."""
     work_dir.mkdir(parents=True, exist_ok=True)
     output_mp4.parent.mkdir(parents=True, exist_ok=True)
 
     segment_files: list[Path] = []
+    global_shot_counter = 0
     for idx, beat in enumerate(topic.beats):
         audio_file = beat_audios[idx]
         seg_out = work_dir / f"segment_{idx:02d}_{beat.beat_id}.mp4"
-        render_beat_video_segment(beat, audio_file, seg_out, work_dir)
-        segment_files.append(seg_out)
+        seg_path, global_shot_counter = render_beat_video_segment(
+            beat=beat,
+            audio_path=audio_file,
+            output_mp4=seg_out,
+            work_dir=work_dir,
+            topic_title=topic.title,
+            topic_category=topic.category,
+            global_shot_start=global_shot_counter,
+        )
+        segment_files.append(seg_path)
 
     # Concat file list
     concat_list = work_dir / "concat_list.txt"
