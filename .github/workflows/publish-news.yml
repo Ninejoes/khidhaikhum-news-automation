@@ -3,14 +3,27 @@ name: News & Whiteboard Reel worker
 on:
   schedule:
     # Bangkok is UTC+7 year-round.
-    # 01:25 UTC -> 08:25 Bangkok (Morning News & Personal Finance Explainer)
+    # Multi-tick retry window per slot (+ dedup guard) prevents GitHub cron drops.
+    # Slot 1: 01:25 UTC -> 08:25 Bangkok (Morning News & Personal Finance Explainer)
     - cron: '25 1 * * *'
-    # 05:25 UTC -> 12:25 Bangkok (Midday Trending Newsjacking Explainer)
+    - cron: '33 1 * * *'
+    - cron: '42 1 * * *'
+    - cron: '53 1 * * *'
+    # Slot 2: 05:25 UTC -> 12:25 Bangkok (Midday Trending Newsjacking Explainer)
     - cron: '25 5 * * *'
-    # 10:25 UTC -> 17:25 Bangkok (Evening Policies, Taxes & Debt Explainer)
+    - cron: '33 5 * * *'
+    - cron: '42 5 * * *'
+    - cron: '53 5 * * *'
+    # Slot 3: 10:25 UTC -> 17:25 Bangkok (Evening Policies, Taxes & Debt Explainer)
     - cron: '25 10 * * *'
-    # 13:25 UTC -> 20:25 Bangkok (Night Global Markets, Gold & Commodities Explainer)
+    - cron: '33 10 * * *'
+    - cron: '42 10 * * *'
+    - cron: '53 10 * * *'
+    # Slot 4: 13:25 UTC -> 20:25 Bangkok (Night Global Markets, Gold & Commodities Explainer)
     - cron: '25 13 * * *'
+    - cron: '33 13 * * *'
+    - cron: '42 13 * * *'
+    - cron: '53 13 * * *'
   repository_dispatch:
     types: [publish-reel, scheduled-publish]
   workflow_dispatch:
@@ -53,6 +66,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: news-reel-publisher
@@ -70,11 +84,37 @@ jobs:
           echo "Scheduled publisher event received at $(date -u --iso-8601=seconds) UTC"
           echo "Configured schedule: ${{ github.event.schedule }}"
 
+      - name: Check slot deduplication guard
+        id: dedup
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          if [ "$EVENT_NAME" != "schedule" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Direct trigger ($EVENT_NAME) — executing immediately."
+            exit 0
+          fi
+          NOW_TS=$(date -u +%s)
+          LAST_SUCCESS_TS=$(gh api "repos/${{ github.repository }}/actions/runs?status=completed&per_page=15" \
+            --jq "[.workflow_runs[] | select(.id != $CURRENT_RUN_ID and .conclusion == \"success\") | .updated_at | fromdateiso8601] | max // 0" 2>/dev/null || echo 0)
+          DIFF=$((NOW_TS - LAST_SUCCESS_TS))
+          echo "Seconds since last successful publish run: ${DIFF}s"
+          if [ "$LAST_SUCCESS_TS" -gt 0 ] && [ "$DIFF" -lt 2700 ]; then
+            echo "Slot already published ${DIFF}s ago (< 45 minutes). Skipping duplicate retry tick."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No publish in the last 45 minutes. Proceeding with scheduled publish!"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check out publisher
+        if: steps.dedup.outputs.skip != 'true'
         uses: actions/checkout@v4
 
       - name: Wait before delayed test
-        if: github.event_name == 'workflow_dispatch'
+        if: steps.dedup.outputs.skip != 'true' && github.event_name == 'workflow_dispatch'
         env:
           DELAY_SECONDS: ${{ inputs.delay_seconds || '0' }}
         run: |
@@ -93,6 +133,7 @@ jobs:
           fi
 
       - name: Install Python
+        if: steps.dedup.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -100,6 +141,7 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install rendering tools and Thai fonts
+        if: steps.dedup.outputs.skip != 'true'
         run: |
           sudo timeout 180 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo timeout 180 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends \
@@ -108,6 +150,7 @@ jobs:
           google-chrome --version || chromium-browser --version || true
 
       - name: Install Python dependencies
+        if: steps.dedup.outputs.skip != 'true'
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
@@ -153,7 +196,7 @@ jobs:
           retention-days: 1
 
       - name: Render and Publish Whiteboard Explainer to Facebook
-        if: (github.event_name == 'schedule') || (github.event_name == 'repository_dispatch') || (github.event_name == 'workflow_dispatch' && inputs.publish == true && (inputs.mode == 'whiteboard-explainer' || inputs.mode == 'auto' || inputs.mode == ''))
+        if: steps.dedup.outputs.skip != 'true' && ((github.event_name == 'schedule') || (github.event_name == 'repository_dispatch') || (github.event_name == 'workflow_dispatch' && inputs.publish == true && (inputs.mode == 'whiteboard-explainer' || inputs.mode == 'auto' || inputs.mode == '')))
         env:
           NEWSROOM_URL: ${{ secrets.NEWSROOM_URL }}
           AUTO_PUBLISH_SECRET: ${{ secrets.AUTO_PUBLISH_SECRET }}
