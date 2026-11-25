@@ -1,0 +1,122 @@
+name: Cloud Auto-Publish Scheduler (24/7 Relay)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Backup watchdog ticks in case the relay chain is ever interrupted
+    - cron: '5 1,5,10,13 * * *'
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: khidhaikhum-cloud-scheduler-relay
+  cancel-in-progress: false
+
+jobs:
+  cloud-timer-relay:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 210
+    steps:
+      - name: Calculate next Bangkok publish slot & wait in cloud
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 - << 'PY'
+          import datetime
+          import json
+          import os
+          import subprocess
+          import sys
+          import time
+
+          repo = os.environ["REPO"]
+          now = datetime.datetime.now(datetime.timezone.utc)
+          print(f"[Cloud Scheduler] Current UTC time: {now.isoformat()}")
+          bkk_now = now + datetime.timedelta(hours=7)
+          print(f"[Cloud Scheduler] Current Bangkok time: {bkk_now.strftime('%Y-%m-%d %H:%M:%S')} ICT")
+
+          # Target daily UTC slots corresponding to 08:25, 12:25, 17:25, 20:25 Bangkok (UTC+7)
+          slot_hours_utc = [(1, 25), (5, 25), (10, 25), (13, 25)]
+
+          candidates = []
+          for day_offset in (0, 1):
+              base_date = (now + datetime.timedelta(days=day_offset)).date()
+              for h, m in slot_hours_utc:
+                  dt = datetime.datetime(base_date.year, base_date.month, base_date.day, h, m, 0, tzinfo=datetime.timezone.utc)
+                  # Only pick slots that are at least 45 seconds in the future
+                  if (dt - now).total_seconds() > 45:
+                      candidates.append(dt)
+
+          candidates.sort()
+          next_slot = candidates[0]
+          wait_seconds = int((next_slot - now).total_seconds())
+          bkk_slot = next_slot + datetime.timedelta(hours=7)
+          print(f"[Cloud Scheduler] Next target publish slot: {bkk_slot.strftime('%Y-%m-%d %H:%M:%S')} ICT ({next_slot.strftime('%H:%M:%S')} UTC)")
+          print(f"[Cloud Scheduler] Total seconds until next slot: {wait_seconds}s ({wait_seconds/60:.1f} min)")
+
+          # Max safe sleep per relay leg is 9000s (2.5 hours), well under GitHub's 6-hour job limit
+          MAX_LEG_SECONDS = 9000
+
+          if wait_seconds > MAX_LEG_SECONDS:
+              print(f"[Cloud Scheduler] Slot is > 2.5h away. Sleeping for {MAX_LEG_SECONDS}s (2.5h) then relaying to next cloud runner...")
+              time.sleep(MAX_LEG_SECONDS)
+              print("[Cloud Scheduler] Waking up from 2.5h relay leg. Spawning next cloud-scheduler.yml runner...")
+              subprocess.run(
+                  ["gh", "workflow", "run", "cloud-scheduler.yml", "--repo", repo],
+                  check=True,
+              )
+              print("[Cloud Scheduler] Next relay spawned successfully.")
+              sys.exit(0)
+
+          # Otherwise, sleep until exact target slot!
+          print(f"[Cloud Scheduler] Sleeping {wait_seconds}s until exact publish slot {bkk_slot.strftime('%H:%M:%S')} ICT...")
+          time.sleep(wait_seconds)
+
+          # Check if publish-news.yml already ran in the last 30 minutes
+          now_ts = int(time.time())
+          out = subprocess.check_output(
+              ["gh", "api", f"repos/{repo}/actions/workflows/publish-news.yml/runs?per_page=5"],
+              text=True,
+          )
+          runs = json.loads(out).get("workflow_runs", [])
+          recent_active = False
+          for r in runs:
+              status = r.get("status")
+              conclusion = r.get("conclusion")
+              created_str = r.get("created_at", "")
+              if created_str:
+                  created_dt = datetime.datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                  age = now_ts - int(created_dt.timestamp())
+                  if age < 1800 and (status in ("in_progress", "queued") or conclusion == "success"):
+                      recent_active = True
+                      print(f"[Cloud Scheduler] Found recent publish-news run {r.get('id')} ({age}s ago, status={status}, conclusion={conclusion}).")
+                      break
+
+          if not recent_active:
+              print(f"[Cloud Scheduler] FIRING scheduled publish-news.yml at {datetime.datetime.now(datetime.timezone.utc).isoformat()}!")
+              subprocess.run(
+                  [
+                      "gh", "workflow", "run", "publish-news.yml",
+                      "-f", "mode=whiteboard-explainer",
+                      "-f", "publish=true",
+                      "--repo", repo,
+                  ],
+                  check=True,
+              )
+              print("[Cloud Scheduler] publish-news.yml triggered successfully!")
+          else:
+              print("[Cloud Scheduler] Slot already covered by recent run; skipping duplicate trigger.")
+
+          # Wait 60s so current slot timestamp passes, then spawn the next relay for the following slot
+          time.sleep(60)
+          print("[Cloud Scheduler] Spawning next cloud-scheduler.yml relay for the following slot...")
+          subprocess.run(
+              ["gh", "workflow", "run", "cloud-scheduler.yml", "--repo", repo],
+              check=True,
+          )
+          print("[Cloud Scheduler] Relay handoff complete!")
+          PY
