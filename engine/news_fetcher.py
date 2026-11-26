@@ -82,7 +82,12 @@ def fetch_news_from_rss(rss_url: str, source_name: str, category: str, timeout: 
             title = _clean_html_text(item.findtext("title") or "")
             encoded = item.findtext("content:encoded", default="", namespaces=ns)
             desc_raw = encoded if len(encoded or "") > 120 else (item.findtext("description") or "")
-            desc = _clean_html_text(desc_raw)[:1400]
+            desc_full = _clean_html_text(desc_raw)
+            if len(desc_full) > 650:
+                cut = desc_full[:650].rfind(" ")
+                desc = desc_full[:cut].strip() if cut > 350 else desc_full[:650].strip()
+            else:
+                desc = desc_full
             link = (item.findtext("link") or "").strip()
             pub_date = (item.findtext("pubDate") or datetime.now(timezone.utc).isoformat()).strip()
 
