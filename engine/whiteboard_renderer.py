@@ -389,14 +389,17 @@ def render_beat_video_segment(
 
         # Last subshot absorbs any floating-point rounding remainder
         t_seg = (duration - sub_dur * (num_subshots - 1)) if s_idx == num_subshots - 1 else sub_dur
-        frame_inputs.extend(["-loop", "1", "-t", f"{t_seg:.3f}", "-i", str(frame_png)])
-        filter_parts.append(f"[{s_idx}:v]settb=AVTB,setpts=PTS-STARTPTS[v{s_idx}]")
+        frame_inputs.extend(["-loop", "1", "-framerate", str(FPS), "-t", f"{t_seg:.3f}", "-i", str(frame_png)])
+        filter_parts.append(
+            f"[{s_idx}:v]fps={FPS},setsar=1,settb=1/{FPS},setpts=PTS-STARTPTS,format=yuv420p[v{s_idx}]"
+        )
         concat_inputs.append(f"[v{s_idx}]")
 
     audio_input_idx = num_subshots
     filter_complex = (
         ";".join(filter_parts)
-        + f";{''.join(concat_inputs)}concat=n={num_subshots}:v=1:a=0[vout];[{audio_input_idx}:a]aresample=48000[aout]"
+        + f";{''.join(concat_inputs)}concat=n={num_subshots}:v=1:a=0[vout];"
+        f"[{audio_input_idx}:a]aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]"
     )
 
     cmd_render = [
@@ -405,8 +408,10 @@ def render_beat_video_segment(
         "-i", str(audio_path),
         "-filter_complex", filter_complex,
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "192k",
+        "-r", str(FPS),
+        "-c:v", "libx264", "-profile:v", "high", "-level", "4.0",
+        "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
         "-t", f"{duration:.2f}",
         "-movflags", "+faststart",
         str(output_mp4),
