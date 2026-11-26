@@ -422,7 +422,7 @@ def build_cover_html(
     flex-direction: column;
     justify-content: flex-end;
     align-items: center;
-    padding: 0 56px 140px 56px;
+    padding: 0 56px 280px 56px;
     text-align: center;
   }}
   .headline-l1 {{
@@ -653,18 +653,18 @@ def build_subshot_html(
       }}
       .hud-top-left {{
         position: absolute;
-        top: 64px;
-        left: 60px;
+        top: 118px;
+        left: 54px;
         background: #1E2433;
         border: 3px solid #E2E8F0;
         border-radius: 22px;
-        padding: 20px 32px;
+        padding: 16px 28px;
         color: #FFFFFF;
         z-index: 10;
         box-shadow: 0 12px 28px rgba(0,0,0,0.22);
       }}
       .hud-line1 {{
-        font-size: 28px;
+        font-size: 26px;
         font-weight: 700;
         color: #F8FAFC;
       }}
@@ -672,31 +672,35 @@ def build_subshot_html(
         color: #FFD54F;
       }}
       .hud-line2 {{
-        font-size: 36px;
+        font-size: 34px;
         font-weight: 800;
         color: #4ADE80;
         margin-top: 4px;
       }}
       .day-pill {{
         position: absolute;
-        top: 68px;
-        right: 60px;
+        top: 122px;
+        right: 54px;
+        max-width: 440px;
         background: #FFD54F;
         border: 4px solid #18181B;
         border-radius: 22px;
-        padding: 16px 36px;
-        font-size: 38px;
+        padding: 14px 28px;
+        font-size: 32px;
         font-weight: 900;
         color: #18181B;
         transform: rotate(-2deg);
         box-shadow: 0 8px 0 #18181B;
         z-index: 10;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }}
       .dialogue-footer {{
         position: absolute;
-        bottom: 95px;
-        left: 60px;
-        right: 60px;
+        bottom: 290px;
+        left: 54px;
+        right: 54px;
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -707,24 +711,24 @@ def build_subshot_html(
         background: {speaker_bg};
         border: 3.5px solid #18181B;
         border-radius: 999px;
-        padding: 8px 34px;
-        font-size: 30px;
+        padding: 6px 32px;
+        font-size: 28px;
         font-weight: 800;
         color: #18181B;
-        margin-bottom: 18px;
+        margin-bottom: 14px;
         box-shadow: 0 6px 16px rgba(0,0,0,0.2);
       }}
       .sub-box {{
-        background: rgba(15, 23, 42, 0.92);
-        border: 3px solid rgba(255,255,255,0.22);
-        border-radius: 28px;
-        padding: 26px 42px;
-        font-size: 44px;
+        background: rgba(15, 23, 42, 0.94);
+        border: 3px solid rgba(255,255,255,0.26);
+        border-radius: 26px;
+        padding: 22px 36px;
+        font-size: 40px;
         font-weight: 800;
         color: #FFFBEB;
-        line-height: 1.32;
+        line-height: 1.3;
         text-shadow: 0 4px 12px rgba(0,0,0,0.8);
-        box-shadow: 0 16px 36px rgba(0,0,0,0.35);
+        box-shadow: 0 16px 36px rgba(0,0,0,0.38);
       }}
     """
 
