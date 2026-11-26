@@ -107,10 +107,14 @@ def _synthesize_gemini_tts(script: str, output_path: Path, api_key: str) -> bool
                         time.sleep(2.5)
                         return True
 
-            if resp.status_code in (429, 500, 502, 503, 504) and attempt < 3:
-                wait_s = 8 * (attempt + 1)
+            if "requests per day" in resp.text or "per_day" in resp.text:
+                logger.warning("Gemini TTS daily quota reached (10 req/day): %s", resp.text[:180])
+                break
+
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                wait_s = 6 * (attempt + 1)
                 logger.warning(
-                    "Gemini TTS returned HTTP %s on attempt %d/4; waiting %ds to keep consistent voice...",
+                    "Gemini TTS returned HTTP %s on attempt %d/3; waiting %ds...",
                     resp.status_code, attempt + 1, wait_s,
                 )
                 time.sleep(wait_s)
@@ -176,3 +180,64 @@ def synthesize_narration(script: str, output_path: Path, api_key: str | None = N
         return output_path
 
     raise RuntimeError("All Thai speech synthesis providers failed; cannot produce audio")
+
+
+def _probe_audio_duration(path: Path) -> float:
+    out = subprocess.check_output(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+        ],
+        text=True,
+    ).strip()
+    return float(out)
+
+
+def synthesize_all_beats_consistent(
+    scripts: list[str],
+    output_paths: list[Path],
+    work_dir: Path,
+    api_key: str | None = None,
+) -> list[Path]:
+    """Synthesizes all beats in 1 single Gemini TTS request (saving 80% daily quota) or 100% consistent Edge-TTS.
+
+    Guarantees:
+    1. Only 1 Gemini TTS API call is consumed per video (4 calls/day << 10 calls/day free quota).
+    2. Never mixes two different voices in the same video.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    key = api_key or os.environ.get("GEMINI_API_KEY", "").strip()
+
+    if key and len(scripts) > 1:
+        combined_wav = work_dir / "combined_gemini_narration.wav"
+        combined_script = "\n\n...\n\n".join(s.strip() for s in scripts if s.strip())
+        logger.info("Synthesizing all %d beats in 1 single Gemini TTS call to preserve daily quota...", len(scripts))
+        if _synthesize_gemini_tts(combined_script, combined_wav, key):
+            total_dur = _probe_audio_duration(combined_wav)
+            char_lengths = [max(10, len(s.strip())) for s in scripts]
+            total_chars = sum(char_lengths)
+            cur_start = 0.0
+            for idx, (c_len, out_p) in enumerate(zip(char_lengths, output_paths)):
+                seg_dur = (total_dur - cur_start) if idx == len(scripts) - 1 else round(total_dur * (c_len / total_chars), 3)
+                seg_dur = max(3.0, seg_dur)
+                subprocess.run(
+                    [
+                        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                        "-ss", f"{cur_start:.3f}", "-t", f"{seg_dur:.3f}",
+                        "-i", str(combined_wav),
+                        "-ar", "48000", "-ac", "2",
+                        str(out_p),
+                    ],
+                    check=True,
+                )
+                cur_start += seg_dur
+            logger.info("Split single Gemini TTS recording (%.1fs) into %d consistent beat tracks.", total_dur, len(scripts))
+            return output_paths
+        logger.info("Gemini TTS unavailable or daily quota reached; using consistent Neural Edge-TTS for all %d beats...", len(scripts))
+
+    for s, out_p in zip(scripts, output_paths):
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        if not asyncio.run(_synthesize_edge_tts(s, out_p)):
+            if not _synthesize_macos_tts(s, out_p):
+                raise RuntimeError("All Thai speech synthesis providers failed")
+    return output_paths

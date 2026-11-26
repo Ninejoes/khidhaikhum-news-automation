@@ -27,7 +27,7 @@ from engine.meta_publisher import ensure_publish_sources, fetch_eligible_newsroo
 from engine.news_fetcher import RawNewsItem, fetch_latest_news
 from engine.script_generator import ProcessedStory, generate_story_script
 from engine.video_renderer import render_full_video
-from engine.voice_synthesizer import synthesize_narration
+from engine.voice_synthesizer import synthesize_all_beats_consistent, synthesize_narration
 from engine.whiteboard_renderer import render_complete_whiteboard_explainer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -122,13 +122,18 @@ def run_explainer_pipeline(
 
         logger.info("Topic ready: %s (%d beats)", topic.title, len(topic.beats))
 
-        # Synthesize narration for each beat individually for perfect sync
-        logger.info("Stage 2: Synthesizing neural Thai narration per beat...")
-        beat_audios: list[Path] = []
-        for idx, beat in enumerate(topic.beats):
-            audio_f = work_dir / f"beat_{idx:02d}_{beat.beat_id}.wav"
-            synthesize_narration(beat.spoken_script, audio_f)
-            beat_audios.append(audio_f)
+        # Synthesize narration across all beats with 100% single-voice consistency & 1-call quota efficiency
+        logger.info("Stage 2: Synthesizing consistent neural Thai narration across all beats...")
+        beat_audios: list[Path] = [
+            work_dir / f"beat_{idx:02d}_{beat.beat_id}.wav"
+            for idx, beat in enumerate(topic.beats)
+        ]
+        synthesize_all_beats_consistent(
+            scripts=[beat.spoken_script for beat in topic.beats],
+            output_paths=beat_audios,
+            work_dir=work_dir,
+            api_key=gemini_key,
+        )
 
         # Calculate total duration
         import subprocess
