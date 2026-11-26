@@ -24,8 +24,8 @@ from engine.whiteboard_renderer import ExplainerBeat, ExplainerTopic
 
 logger = logging.getLogger(__name__)
 
-GEMINI_PRIMARY_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-GEMINI_FALLBACK_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GEMINI_PRIMARY_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+GEMINI_FALLBACK_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent"
 
 NEWS_EXPLAINER_SYSTEM_PROMPT = """คุณคือบรรณาธิการและผู้เชี่ยวชาญด้านการเงินของเพจ "คิดให้คุ้ม - เห็นตัวเลขจริงก่อนตัดสินใจ"
 หน้าที่ของคุณคือนำ "ข่าวเศรษฐกิจ/การเงิน/กระแสสังคม/นโยบาย" มาแปลงเป็นบทวิดีโอสั้น Whiteboard Explainer 5 Beats
@@ -205,101 +205,178 @@ def build_seo_caption(title: str, summary: str, math_points: list[str], hashtags
     )
 
 
+def _clean_headline_prefix(raw_title: str) -> str:
+    """Removes leading timestamps like 'ด่วน 22:00 — ' or '14:00 — ' without cutting actual content."""
+    t = raw_title.strip()
+    t = re.sub(
+        r"^(?:ข่าวด่วน|ด่วนพิเศษ|ด่วน)\s*(?:\d{1,2}[:.]\d{2}(?:\s*น\.?)?)?\s*(?:[—–\-:|•]\s*)?",
+        "",
+        t,
+    ).strip()
+    t = re.sub(r"^\d{1,2}[:.]\d{2}(?:\s*น\.?)?\s*(?:[—–\-:|•]\s*)+", "", t).strip()
+    return t or raw_title.strip()
+
+
+def _split_clean_clauses(text: str, max_chars: int = 66) -> list[str]:
+    """Splits Thai text at natural clause/space boundaries without ever cutting a word in half."""
+    raw_parts = re.split(r"[;\n•]+|\s+(?=ขณะที่|ส่วน|โดย|หลัง|แต่|รวมถึง|ส่งผลให้|ทำให้)", text)
+    clauses: list[str] = []
+    for part in raw_parts:
+        p = part.strip(" \t\r\n•-—–")
+        if not p:
+            continue
+        if len(p) <= max_chars:
+            clauses.append(p)
+        else:
+            words = p.split()
+            buf = ""
+            for w in words:
+                if not buf:
+                    buf = w
+                elif len(buf) + 1 + len(w) <= max_chars:
+                    buf = f"{buf} {w}"
+                else:
+                    clauses.append(buf)
+                    buf = w
+            if buf:
+                clauses.append(buf)
+    return [c for c in clauses if len(c) >= 6]
+
+
 def deterministic_news_to_explainer(news_item: dict[str, Any]) -> ExplainerTopic:
-    """Deterministic, 100% resilient converter that transforms any news item into 5 beats."""
-    title = news_item.get("title", "").strip() or "สรุปข่าวเศรษฐกิจล่าสุด"
-    summary = news_item.get("summary", "").strip()
-    impact = news_item.get("impact", "").strip() or "กระทบต่อต้นทุนและเงินในกระเป๋าที่เราต้องวางแผน"
-    category = news_item.get("category", "ข่าวเศรษฐกิจและการเงิน")
+    """Transforms a verified D1/RSS news item into 5 rich, non-truncated beats using its real script & bullets."""
+    raw_title = news_item.get("title", "").strip() or "สรุปข่าวเศรษฐกิจล่าสุด"
+    clean_title = _clean_headline_prefix(raw_title)
+    summary = news_item.get("summary", "").strip() or clean_title
+    impact = news_item.get("impact", "").strip() or "ส่งผลต่อทิศทางดอกเบี้ย ต้นทุน และเงินในกระเป๋าที่ต้องวางแผนล่วงหน้า"
+    raw_script = news_item.get("script", "").strip()
+    raw_caption = news_item.get("caption", "").strip()
+    category = news_item.get("category", "ข่าวเศรษฐกิจและการเงิน").strip()
 
-    # Extract numbers or percentages for the math beat
-    found_numbers = re.findall(r"(\d+(?:[.,]\d+)?\s*(?:%|ดอลลาร์|บาท|ล้าน|จุด|แสน|เหรียญ|เท่า))", f"{title} {summary}")
-    num_highlight1 = found_numbers[0] if len(found_numbers) > 0 else "ตัวเลขสำคัญที่ต้องจับตา"
-    num_highlight2 = found_numbers[1] if len(found_numbers) > 1 else "กระทบการตัดสินใจทางการเงิน"
+    # Extract bullet points from caption if present
+    caption_bullets = [
+        line.strip(" •-\t")
+        for line in raw_caption.splitlines()
+        if line.strip().startswith("•") and len(line.strip(" •-\t")) >= 10
+    ]
 
-    hook_doodle = select_doodle_for_text(title)
+    summary_clauses = _split_clean_clauses(summary, max_chars=64)
+    impact_clauses = _split_clean_clauses(impact, max_chars=64)
+    all_fact_clauses = caption_bullets + summary_clauses
+
+    # Extract all numbers/metrics with their units
+    found_numbers = re.findall(
+        r"([+-]?\d+(?:[.,–-]\d+)?\s*(?:%|เปอร์เซ็นต์|ดอลลาร์|บาท|สตางค์|สต\.|ล้านล้าน|แสนล้าน|หมื่นล้าน|พันล้าน|ล้าน|แสน|จุด|เท่า|ปี|เดือน))",
+        f"{clean_title} {summary} {impact}",
+    )
+    # Deduplicate while preserving order
+    unique_nums: list[str] = []
+    for n in found_numbers:
+        n_clean = n.strip()
+        if n_clean and n_clean not in unique_nums:
+            unique_nums.append(n_clean)
+
+    num_highlight1 = unique_nums[0] if len(unique_nums) > 0 else "ตัวเลขเศรษฐกิจล่าสุด"
+    num_highlight2 = unique_nums[1] if len(unique_nums) > 1 else (unique_nums[0] if unique_nums else "ผลกระทบต่อค่าครองชีพ")
+
+    hook_doodle = select_doodle_for_text(clean_title)
     math_doodle = "calculator" if hook_doodle != "calculator" else "money_bag"
 
-    # Clean short title for frame
-    clean_title = re.sub(r"^(?:ด่วน[^\s—–-]*|\d+[:.]\d+\s*น\.?|\d+\s*(?:ม\.ค\.|ก\.พ\.|มี\.ค\.|เม\.ย\.|พ\.ค\.|มิ\.ย\.|ก\.ค\.|ส\.ค\.|ก\.ย\.|ต\.ค\.|พ\.ย\.|ธ\.ค\.)|[—–\-:!|•\s])+", "", title).strip()
-    if len(clean_title) > 30:
-        cutoff = clean_title[:30].rfind(" ")
-        short_title = clean_title[:cutoff].strip() if cutoff > 12 else clean_title[:30].strip()
+    # Build word-safe short title (never cut mid-word)
+    title_clauses = _split_clean_clauses(clean_title, max_chars=38)
+    short_title = title_clauses[0] if title_clauses else clean_title[:38]
+    sub_hook = title_clauses[1] if len(title_clauses) > 1 else (summary_clauses[0] if summary_clauses else "สรุปตัวเลขจริงและผลกระทบ")
+
+    # Build 5-beat spoken scripts from the real verified news script + summary + impact
+    script_clauses = _split_clean_clauses(raw_script or f"{summary} {impact}", max_chars=95)
+    if len(script_clauses) >= 4:
+        n_sc = len(script_clauses)
+        hook_spoken = f"{clean_title} {script_clauses[0]}"
+        mech_spoken = " ".join(script_clauses[1 : max(2, n_sc // 2)])
+        warn_spoken = f"{impact}"
+        math_spoken = " ".join(script_clauses[max(2, n_sc // 2) :])
     else:
-        short_title = clean_title
+        hook_spoken = f"ประเด็นสำคัญที่ต้องจับตาครับ {clean_title}"
+        mech_spoken = summary
+        warn_spoken = impact
+        math_spoken = raw_script if raw_script else f"ตัวเลขสำคัญในข่าวนี้คือ {num_highlight1} และ {num_highlight2}"
+
+    c_hook_1 = all_fact_clauses[0] if len(all_fact_clauses) > 0 else clean_title
+    c_hook_2 = all_fact_clauses[1] if len(all_fact_clauses) > 1 else sub_hook
+    c_mech_1 = summary_clauses[0] if len(summary_clauses) > 0 else c_hook_1
+    c_mech_2 = summary_clauses[1] if len(summary_clauses) > 1 else (all_fact_clauses[2] if len(all_fact_clauses) > 2 else c_hook_2)
+    c_warn_1 = impact_clauses[0] if len(impact_clauses) > 0 else impact
+    c_warn_2 = impact_clauses[1] if len(impact_clauses) > 1 else (summary_clauses[-1] if summary_clauses else clean_title)
+    c_math_1 = caption_bullets[0] if len(caption_bullets) > 0 else f"ตัวเลขหลัก: {num_highlight1} ({c_hook_1})"
+    c_math_2 = caption_bullets[1] if len(caption_bullets) > 1 else f"เทียบเกณฑ์สำคัญ: {num_highlight2}"
+
+    checklist_items = [
+        c_warn_1,
+        c_math_1,
+        "เช็กต้นทุน สภาพคล่อง และเปรียบเทียบตัวเลขจริงก่อนตัดสินใจ",
+    ]
+    check_spoken = (
+        f"สรุปมุมคิดให้คุ้ม 1. {c_warn_1} "
+        f"2. จับตากรอบตัวเลข {num_highlight1} ก่อนตัดสินใจทางการเงิน "
+        f"คุณมองประเด็นนี้ยังไง คอมเมนต์แลกเปลี่ยนกันได้เลยครับ"
+    )
 
     beats = [
         ExplainerBeat(
             beat_id="hook",
             doodle_name=hook_doodle,
             title=short_title,
-            subtitle="สรุปประเด็นร้อน กระทบเรายังไง?",
-            callouts=[
-                f"🚨 {clean_title[:38]}",
-                f"📌 สิ่งที่ต้องรู้: {summary[:40]}...",
-            ],
-            spoken_script=f"มีข่าวด่วนที่ต้องจับตาครับ {clean_title} เรื่องนี้ส่งผลกระทบต่อเรายังไง วันนี้ คิดให้คุ้ม สรุปเนื้อหาสำคัญและตัวเลขจริงมาให้ฟังกันครับ",
+            subtitle=sub_hook,
+            callouts=[c_hook_1, c_hook_2],
+            spoken_script=hook_spoken,
             marker_coords=(840, 1200),
         ),
         ExplainerBeat(
             beat_id="mechanism",
             doodle_name="chart" if hook_doodle != "chart" else "globe",
-            title="เกิดอะไรขึ้น เบื้องหลังคืออะไร?",
-            subtitle="เจาะลึกสาเหตุและกลไกที่เกิดขึ้น",
-            callouts=[
-                f"📈 สาเหตุหลัก: {summary[:42]}",
-                "⚙️ ปัจจัยขับเคลื่อนที่ต้องติดตาม",
-            ],
-            spoken_script=f"สาเหตุของเรื่องนี้ เกิดจาก {summary[:120]} ซึ่งเป็นกลไกที่ตลาดและผู้เชี่ยวชาญกำลังจับตามองอย่างใกล้ชิดครับ",
+            title="เจาะลึกตัวเลขและสาเหตุหลัก",
+            subtitle=f"ตัวเลขสำคัญ: {num_highlight1}",
+            callouts=[c_mech_1, c_mech_2],
+            spoken_script=mech_spoken,
             marker_coords=(820, 1220),
         ),
         ExplainerBeat(
             beat_id="warning",
             doodle_name="warning",
-            title="ข้อควรระวัง & ผลกระทบ!",
-            subtitle="คิดให้คุ้ม ก่อนตัดสินใจ",
-            callouts=[
-                f"⚠️ ผลกระทบ: {impact[:40]}",
-                "🛑 อย่าเพิ่งตื่นตระหนก วางแผนให้รอบคอบ",
-            ],
-            spoken_script=f"ข้อควรระวังคือ {impact[:100]} หากเราไม่วางแผนให้ดี อาจส่งผลกระทบต่อต้นทุนหรือเงินในกระเป๋าได้ครับ",
+            title="ผลกระทบและจุดที่ต้องระวัง",
+            subtitle=f"มุมมองต่อไทยและเงินในกระเป๋า",
+            callouts=[c_warn_1, c_warn_2],
+            spoken_script=warn_spoken,
             marker_coords=(840, 1210),
         ),
         ExplainerBeat(
             beat_id="math",
             doodle_name=math_doodle,
-            title="ตัวเลขจริงที่ต้องรู้",
-            subtitle="คำนวณผลกระทบให้เห็นชัดๆ",
-            callouts=[
-                f"🔢 ตัวเลขหลัก: {num_highlight1}",
-                f"💡 จุดสังเกต: {num_highlight2}",
-            ],
-            spoken_script=f"มาดูตัวเลขจริงกันครับ การเคลื่อนไหวครั้งนี้มีตัวเลขสำคัญคือ {num_highlight1} และ {num_highlight2} ซึ่งเป็นเกณฑ์ชี้วัดทิศทางต่อจากนี้ครับ",
+            title=f"เทียบตัวเลขชัดๆ: {num_highlight1}",
+            subtitle=f"เปรียบเทียบกับ {num_highlight2}",
+            callouts=[c_math_1, c_math_2],
+            spoken_script=math_spoken,
             marker_coords=(820, 1220),
         ),
         ExplainerBeat(
             beat_id="checklist",
             doodle_name="checklist",
-            title="เช็กลิสต์ 3 ข้อรับมือ",
-            subtitle="ทำตามนี้ รับมือได้ทุกสถานการณ์",
-            callouts=[
-                "1. ติดตามข้อมูลข่าวสารอย่างต่อเนื่อง",
-                "2. บริหารจัดการสภาพคล่องและเงินสด",
-            ],
-            spoken_script=f"สรุปสิ่งที่ต้องทำ 1. เช็กตัวเลขจริงก่อนตัดสินใจ 2. รักษาสภาพคล่อง 3. ปรับแผนให้สอดคล้องกับสถานการณ์ คุณคิดเห็นอย่างไรกับเรื่องนี้ คอมเมนต์บอกเราได้เลยครับ",
+            title="3 ข้อสรุปคิดให้คุ้มก่อนตัดสินใจ",
+            subtitle="เช็กตัวเลขจริงให้ครบทุกมิติ",
+            callouts=checklist_items,
+            spoken_script=check_spoken,
             marker_coords=(840, 1200),
         ),
     ]
 
-    math_points = [
-        f"ตัวเลขสำคัญ: {num_highlight1}",
-        f"การเปลี่ยนแปลง: {num_highlight2}",
-        f"ผลกระทบ: {impact[:80]}",
-    ]
-    caption = build_seo_caption(title, summary, math_points)
+    if raw_caption and len(raw_caption) >= 60:
+        caption = raw_caption
+    else:
+        math_points = [c_hook_1, c_mech_1, c_warn_1]
+        caption = build_seo_caption(clean_title, summary, math_points)
 
     return ExplainerTopic(
-        title=f"{short_title} — สรุปประเด็นตัวเลขจริง",
+        title=clean_title,
         category=category,
         summary=summary,
         caption=caption,

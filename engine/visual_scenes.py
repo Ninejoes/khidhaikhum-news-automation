@@ -53,31 +53,49 @@ def detect_visual_theme(text: str) -> str:
 
 
 def split_cover_headlines(title: str, subtitle: str = "") -> tuple[str, str]:
-    """Splits a topic title into two punchy cover headline lines (Line 1 Orange, Line 2 White)."""
+    """Splits a topic title into two punchy cover headline lines (Line 1 Orange, Line 2 White) without mid-word cutoffs."""
     clean_title = re.sub(r"—\s*—", "—", title).strip()
     clean_title = re.sub(r"\s*—\s*สรุปประเด็นตัวเลขจริง.*$", "", clean_title).strip()
-    clean_title = re.sub(r"^\d{1,2}:\d{2}\s*—\s*", "", clean_title).strip()
+    clean_title = re.sub(
+        r"^(?:ข่าวด่วน|ด่วนพิเศษ|ด่วน)\s*(?:\d{1,2}[:.]\d{2}(?:\s*น\.?)?)?\s*(?:[—–\-:|•]\s*)?",
+        "",
+        clean_title,
+    ).strip()
+    clean_title = re.sub(r"^\d{1,2}[:.]\d{2}(?:\s*น\.?)?\s*(?:[—–\-:|•]\s*)+", "", clean_title).strip()
 
-    if "—" in clean_title:
-        parts = [p.strip() for p in clean_title.split("—") if p.strip()]
-        if len(parts) >= 2:
-            return parts[0][:24], parts[1][:28]
-
-    if ":" in clean_title:
-        parts = [p.strip() for p in clean_title.split(":") if p.strip()]
-        if len(parts) >= 2:
-            return parts[0][:24], parts[1][:28]
+    for sep in ("—", ":", "|", "/"):
+        if sep in clean_title:
+            parts = [p.strip() for p in clean_title.split(sep) if p.strip()]
+            if len(parts) >= 2 and len(parts[0]) >= 6:
+                return parts[0][:28], parts[1][:32]
 
     words = clean_title.split()
     if len(words) >= 2:
-        mid = max(1, len(words) // 2)
-        line1 = " ".join(words[:mid])
-        line2 = " ".join(words[mid:])
-        if len(line1) <= 22 and len(line2) <= 28:
-            return line1, line2
+        # Find split point closest to 45% of total character length
+        target_len = len(clean_title) * 0.46
+        best_idx = 1
+        best_diff = 999.0
+        for i in range(1, len(words)):
+            l1 = " ".join(words[:i])
+            diff = abs(len(l1) - target_len)
+            if diff < best_diff:
+                best_diff = diff
+                best_idx = i
+        line1 = " ".join(words[:best_idx]).strip()
+        line2 = " ".join(words[best_idx:]).strip()
+        if len(line2) > 32:
+            w2 = line2.split()
+            out2 = ""
+            for w in w2:
+                if len(out2) + 1 + len(w) <= 32:
+                    out2 = f"{out2} {w}".strip()
+                else:
+                    break
+            line2 = out2 or line2[:32]
+        return line1, line2
 
-    line1 = clean_title[:22]
-    line2 = subtitle.strip()[:26] if subtitle.strip() else "กระทบเงินในกระเป๋าแค่ไหน?"
+    line1 = clean_title[:26]
+    line2 = subtitle.strip()[:30] if subtitle.strip() else "กระทบเงินในกระเป๋าแค่ไหน?"
     return line1, line2
 
 
@@ -730,9 +748,9 @@ def build_subshot_html(
           </div>
 
           <!-- Calendar Card Behind Phone -->
-          <div style="position:absolute;top:495px;left:430px;width:230px;height:250px;background:#FFFFFF;border:6px solid #18181B;border-radius:22px;overflow:hidden;transform:rotate(-3deg);box-shadow:0 12px 24px rgba(0,0,0,0.15);">
+          <div style="position:absolute;top:490px;left:335px;width:225px;height:245px;background:#FFFFFF;border:6px solid #18181B;border-radius:22px;overflow:hidden;transform:rotate(-4deg);box-shadow:0 12px 24px rgba(0,0,0,0.15);">
             <div style="height:64px;background:#E53935;border-bottom:5px solid #18181B;display:flex;align-items:center;justify-content:center;color:#FFF;font-size:26px;font-weight:800;">เช็กด่วน</div>
-            <div style="display:flex;align-items:center;justify-content:center;height:180px;font-size:96px;font-weight:900;color:#18181B;">#{global_shot_idx}</div>
+            <div style="display:flex;align-items:center;justify-content:center;height:175px;font-size:88px;font-weight:900;color:#18181B;">#{global_shot_idx}</div>
           </div>
 
           <!-- Mobile Banking App Mockup Right -->
@@ -743,8 +761,8 @@ def build_subshot_html(
             </div>
             <div style="padding:42px 26px;text-align:center;">
               <div style="font-size:26px;color:#64748B;font-weight:700;">ตัวเลขสำคัญในช็อตนี้</div>
-              <div style="font-size:60px;font-weight:900;color:#18181B;margin:18px 0;line-height:1.15;">{html.escape(num_highlight)}</div>
-              <div style="font-size:26px;color:#E53935;font-weight:700;margin-bottom:34px;">{html.escape(beat_subtitle[:36])}</div>
+              <div style="font-size:58px;font-weight:900;color:#18181B;margin:18px 0;line-height:1.15;">{html.escape(num_highlight)}</div>
+              <div style="font-size:26px;color:#E53935;font-weight:700;margin-bottom:34px;line-height:1.3;">{html.escape(beat_subtitle)}</div>
               <div style="background:#2EBD6B;color:#FFFFFF;font-size:32px;font-weight:800;padding:18px 0;border-radius:18px;">ดูตัวเลขจริง</div>
             </div>
           </div>
@@ -881,13 +899,13 @@ def build_subshot_html(
 
           <!-- Horizontal Stacked Proportion Bar (like IG Reel arc_11) -->
           <div style="margin-top:55px;width:100%;height:190px;border:7px solid #090D16;border-radius:24px;overflow:hidden;display:flex;box-shadow:0 18px 42px rgba(0,0,0,0.45);">
-            <div style="width:74%;background:#DC4C3E;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;border-right:6px solid #090D16;">
-              <div style="font-size:38px;font-weight:900;color:#FFFFFF;text-shadow:0 3px 8px rgba(0,0,0,0.6);">ปัจจัยหลัก (74%)</div>
-              <div style="font-size:30px;font-weight:700;color:#FEF08A;margin-top:6px;">{html.escape(num_highlight)}</div>
+            <div style="width:65%;background:#DC4C3E;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;border-right:6px solid #090D16;">
+              <div style="font-size:32px;font-weight:800;color:#FFFFFF;text-shadow:0 3px 8px rgba(0,0,0,0.6);">ตัวเลขหลัก</div>
+              <div style="font-size:44px;font-weight:900;color:#FEF08A;margin-top:4px;">{html.escape(num_highlight)}</div>
             </div>
-            <div style="width:26%;background:#F59E0B;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:14px;">
-              <div style="font-size:32px;font-weight:900;color:#18181B;">ส่วนเพิ่ม</div>
-              <div style="font-size:26px;font-weight:800;color:#18181B;">26%</div>
+            <div style="width:35%;background:#F59E0B;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:14px;">
+              <div style="font-size:28px;font-weight:800;color:#18181B;">จุดเปรียบเทียบ</div>
+              <div style="font-size:34px;font-weight:900;color:#18181B;margin-top:4px;">{html.escape(_extract_number_badge(secondary_callout, "เช็กผลกระทบ"))}</div>
             </div>
           </div>
 

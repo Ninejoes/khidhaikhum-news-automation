@@ -13,6 +13,7 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 import requests
 
@@ -50,60 +51,80 @@ async def _synthesize_edge_tts(script: str, output_path: Path, voice: str = DEFA
 
 
 def _synthesize_gemini_tts(script: str, output_path: Path, api_key: str) -> bool:
-    """Generates Thai speech using Gemini 3.8 Flash TTS Interactions API."""
-    try:
-        model = os.environ.get("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts").strip()
-        voice = os.environ.get("GEMINI_TTS_VOICE", "Charon").strip()
-        style = (
-            "A calm, warm, low-pitched adult Thai male news anchor; "
-            "clear Thai pronunciation, steady pace, confident and natural."
-        )
-        request_body = {
-            "model": model,
-            "input": [
-                {
-                    "type": "user_input",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": script,
-                            "annotations": [{"type": "speech_metadata", "style": style}],
-                        }
-                    ],
-                }
-            ],
-            "response_format": {"type": "audio"},
-            "generation_config": {"speech_config": [{"voice": voice}]},
-        }
+    """Generates Thai speech using Gemini 3.8 Flash TTS Interactions API with rate-limit retry."""
+    model = os.environ.get("GEMINI_TTS_MODEL", "gemini-3.8-flash-tts").strip()
+    voice = os.environ.get("GEMINI_TTS_VOICE", "Charon").strip()
+    style = (
+        "A calm, warm, low-pitched adult Thai male news anchor; "
+        "clear Thai pronunciation, steady pace, confident and natural."
+    )
+    request_body = {
+        "model": model,
+        "input": [
+            {
+                "type": "user_input",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": script,
+                        "annotations": [{"type": "speech_metadata", "style": style}],
+                    }
+                ],
+            }
+        ],
+        "response_format": {"type": "audio"},
+        "generation_config": {"speech_config": [{"voice": voice}]},
+    }
 
-        resp = requests.post(
-            GEMINI_TTS_ENDPOINT,
-            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-            json=request_body,
-            timeout=(15, 180),
-        )
-        if resp.ok:
-            payload = resp.json()
-            encoded_audio = (payload.get("output_audio") or {}).get("data")
-            if not encoded_audio:
-                for step in reversed(payload.get("steps") or []):
-                    if step.get("type") != "model_output":
-                        continue
-                    for part in step.get("content") or []:
-                        if part.get("type") == "audio" and part.get("data"):
-                            encoded_audio = part["data"]
+    for attempt in range(4):
+        try:
+            resp = requests.post(
+                GEMINI_TTS_ENDPOINT,
+                headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                json=request_body,
+                timeout=(15, 180),
+            )
+            if resp.ok:
+                payload = resp.json()
+                encoded_audio = (payload.get("output_audio") or {}).get("data")
+                if not encoded_audio:
+                    for step in reversed(payload.get("steps") or []):
+                        if step.get("type") != "model_output":
+                            continue
+                        for part in step.get("content") or []:
+                            if part.get("type") == "audio" and part.get("data"):
+                                encoded_audio = part["data"]
+                                break
+                        if encoded_audio:
                             break
-                    if encoded_audio:
-                        break
 
-            if encoded_audio:
-                audio_bytes = base64.b64decode(encoded_audio)
-                if len(audio_bytes) > 50_000:
-                    output_path.write_bytes(audio_bytes)
-                    logger.info("Gemini TTS narration created: %d bytes", len(audio_bytes))
-                    return True
-    except Exception as exc:
-        logger.warning("Gemini TTS failed (%s): %s", type(exc).__name__, exc)
+                if encoded_audio:
+                    audio_bytes = base64.b64decode(encoded_audio)
+                    if len(audio_bytes) > 50_000:
+                        output_path.write_bytes(audio_bytes)
+                        logger.info("Gemini TTS narration created: %d bytes (attempt %d)", len(audio_bytes), attempt + 1)
+                        # Brief pacing pause so back-to-back beats don't trigger 429 burst limits
+                        time.sleep(2.5)
+                        return True
+
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+                wait_s = 8 * (attempt + 1)
+                logger.warning(
+                    "Gemini TTS returned HTTP %s on attempt %d/4; waiting %ds to keep consistent voice...",
+                    resp.status_code, attempt + 1, wait_s,
+                )
+                time.sleep(wait_s)
+                continue
+
+            logger.warning("Gemini TTS non-retryable HTTP %s: %s", resp.status_code, resp.text[:180])
+            break
+        except Exception as exc:
+            if attempt < 3:
+                wait_s = 6 * (attempt + 1)
+                logger.warning("Gemini TTS error (%s) on attempt %d/4; retrying in %ds...", type(exc).__name__, attempt + 1, wait_s)
+                time.sleep(wait_s)
+            else:
+                logger.warning("Gemini TTS failed after 4 attempts (%s): %s", type(exc).__name__, exc)
 
     return False
 

@@ -1,29 +1,6 @@
 name: News & Whiteboard Reel worker
 
 on:
-  schedule:
-    # Bangkok is UTC+7 year-round.
-    # Multi-tick retry window per slot (+ dedup guard) prevents GitHub cron drops.
-    # Slot 1: 01:25 UTC -> 08:25 Bangkok (Morning News & Personal Finance Explainer)
-    - cron: '25 1 * * *'
-    - cron: '33 1 * * *'
-    - cron: '42 1 * * *'
-    - cron: '53 1 * * *'
-    # Slot 2: 05:25 UTC -> 12:25 Bangkok (Midday Trending Newsjacking Explainer)
-    - cron: '25 5 * * *'
-    - cron: '33 5 * * *'
-    - cron: '42 5 * * *'
-    - cron: '53 5 * * *'
-    # Slot 3: 10:25 UTC -> 17:25 Bangkok (Evening Policies, Taxes & Debt Explainer)
-    - cron: '25 10 * * *'
-    - cron: '33 10 * * *'
-    - cron: '42 10 * * *'
-    - cron: '53 10 * * *'
-    # Slot 4: 13:25 UTC -> 20:25 Bangkok (Night Global Markets, Gold & Commodities Explainer)
-    - cron: '25 13 * * *'
-    - cron: '33 13 * * *'
-    - cron: '42 13 * * *'
-    - cron: '53 13 * * *'
   repository_dispatch:
     types: [publish-reel, scheduled-publish]
   workflow_dispatch:
