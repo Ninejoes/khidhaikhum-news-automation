@@ -353,14 +353,17 @@ def fetch_eligible_newsroom_item(
         except Exception as exc:
             logger.warning("Queue query (%s) failed: %s", q_mode, exc)
 
-    # Fallback: Query public /api/news
+    # Fallback: Query public /api/news (only pick fresh items within last 24h unless explicit item_id)
     try:
         r_news = requests.get(f"{base_url.rstrip('/')}/api/news", headers=headers, timeout=20)
         logger.info("Public /api/news status %s", r_news.status_code)
         if r_news.ok:
             items = r_news.json().get("items") or []
             logger.info("Discovered %d saved items in Newsroom D1", len(items))
-            for it in items:
+            now_utc = datetime.now(timezone.utc)
+            # Sort newest checkedAt first so we never pick stale Nov 23/24 leftovers before fresh news
+            items_sorted = sorted(items, key=lambda x: str(x.get("checkedAt") or ""), reverse=True)
+            for it in items_sorted:
                 it_id = str(it.get("id") or "").strip('"\'').strip()
                 it_status = it.get("status")
                 it_post_url = it.get("facebookPostUrl")
@@ -368,8 +371,20 @@ def fetch_eligible_newsroom_item(
                 if item_id and it_id != item_id:
                     continue
 
+                if not item_id:
+                    checked_raw = str(it.get("checkedAt") or "").strip()
+                    try:
+                        checked_dt = datetime.fromisoformat(checked_raw.replace("Z", "+00:00"))
+                        if checked_dt.tzinfo is None:
+                            checked_dt = checked_dt.replace(tzinfo=timezone.utc)
+                        age_hours = (now_utc - checked_dt).total_seconds() / 3600.0
+                        if age_hours > 24.0:
+                            continue
+                    except Exception:
+                        pass
+
                 if it_status == "script_ready" and not it_post_url:
-                    logger.info("Selected ready unposted item from D1: %s", it_id)
+                    logger.info("Selected ready unposted item from D1: %s (%s)", it_id, it.get("title", "")[:35])
                     item_sources = it.get("sources") or curated_sources
                     item_sources = ensure_publish_sources(item_sources, it.get("title", ""))
                     return it, item_sources

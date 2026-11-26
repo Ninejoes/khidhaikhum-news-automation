@@ -5,7 +5,9 @@ via RSS feeds or public news APIs, returning structured items.
 """
 from __future__ import annotations
 
+import html
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -53,10 +55,20 @@ class RawNewsItem:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _clean_html_text(raw: str) -> str:
+    """Strips HTML tags, decodes entities (like &#8230;), and collapses whitespace."""
+    if not raw:
+        return ""
+    txt = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+    txt = re.sub(r"\[(?:\.\.\.|…)\]", "", txt)
+    return re.sub(r"\s+", " ", txt).strip()
+
+
 def fetch_news_from_rss(rss_url: str, source_name: str, category: str, timeout: int = 15) -> list[RawNewsItem]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
+    ns = {"content": "http://purl.org/rss/1.0/modules/content/"}
     items: list[RawNewsItem] = []
     try:
         resp = requests.get(rss_url, headers=headers, timeout=timeout)
@@ -66,9 +78,11 @@ def fetch_news_from_rss(rss_url: str, source_name: str, category: str, timeout: 
 
         root = ET.fromstring(resp.content)
         # Standard RSS 2.0 has <channel><item>...
-        for item in root.findall(".//item")[:10]:
-            title = (item.findtext("title") or "").strip()
-            desc = (item.findtext("description") or "").strip()
+        for item in root.findall(".//item")[:15]:
+            title = _clean_html_text(item.findtext("title") or "")
+            encoded = item.findtext("content:encoded", default="", namespaces=ns)
+            desc_raw = encoded if len(encoded or "") > 120 else (item.findtext("description") or "")
+            desc = _clean_html_text(desc_raw)[:1400]
             link = (item.findtext("link") or "").strip()
             pub_date = (item.findtext("pubDate") or datetime.now(timezone.utc).isoformat()).strip()
 
@@ -86,6 +100,9 @@ def fetch_news_from_rss(rss_url: str, source_name: str, category: str, timeout: 
     except Exception as exc:
         logger.warning("Failed parsing RSS %s: %s", rss_url, exc)
 
+    # Prioritize core finance/gold/tax/market stories over unrelated lifestyle/accident items
+    finance_kw = ("ทอง", "หุ้น", "set", "บาท", "ดอกเบี้ย", "น้ำมัน", "ดีเซล", "ภาษี", "เศรษฐกิจ", "แบงก์", "กู้", "เงิน", "สหรัฐ", "ส่งออก")
+    items.sort(key=lambda x: sum(1 for k in finance_kw if k in f"{x.title} {x.summary[:200]}".lower()), reverse=True)
     return items
 
 
